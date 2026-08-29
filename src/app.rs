@@ -398,26 +398,90 @@ impl XxsshgApp {
     // -- ui ------------------------------------------------------------------
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {
+        // Action buttons live in a bottom sub-panel: whatever the UI zoom level,
+        // they are pinned to the bottom of the sidebar and can never be pushed
+        // out of the visible area by the server list.
+        egui::Panel::bottom(egui::Id::new("sidebar_actions"))
+            .resizable(false)
+            .show_inside(ui, |ui| {
+                ui.add_space(4.0);
+
+                // Primary action: Connect + hamburger (more) menu
+                let can_connect =
+                    !self.servers.is_empty() && self.selected_server < self.servers.len();
+                ui.horizontal(|ui| {
+                    let lang = self.lang();
+                    ui.add_enabled_ui(can_connect, |ui| {
+                        let btn_w = ui.available_width() - 34.0;
+                        let connect_btn = ui.add_sized(
+                            [btn_w, 26.0],
+                            egui::Button::new(
+                                egui::RichText::new(tpl(tr(lang, "btn_connect"), &[])).strong(),
+                            ),
+                        );
+                        if connect_btn.clicked() {
+                            self.connect_server(self.selected_server);
+                        }
+                    });
+                    ui.menu_button("☰", |ui| {
+                        if ui.button(tpl(tr(lang, "settings_title"), &[])).clicked() {
+                            self.settings_open = true;
+                            ui.close();
+                        }
+                        if ui.button(tpl(tr(lang, "menu_about"), &[])).clicked() {
+                            self.about_open = true;
+                            ui.close();
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+
+                // Row: New / Edit / Delete
+                ui.horizontal(|ui| {
+                    let w = [(ui.available_width() - 12.0) / 3.0, 22.0];
+                    if ui
+                        .add_sized(w, egui::Button::new(tpl(tr(self.lang(), "btn_new"), &[])))
+                        .clicked()
+                    {
+                        self.form = Some(ServerForm::new());
+                        self.form_open = true;
+                    }
+                    let can_edit =
+                        !self.servers.is_empty() && self.selected_server < self.servers.len();
+                    ui.add_enabled_ui(can_edit, |ui| {
+                        if ui
+                            .add_sized(w, egui::Button::new(tpl(tr(self.lang(), "btn_edit"), &[])))
+                            .clicked()
+                        {
+                            let srv = self.servers[self.selected_server].clone();
+                            self.form = Some(ServerForm::from_server(self.selected_server, &srv));
+                            self.form_open = true;
+                        }
+                        if ui
+                            .add_sized(w, egui::Button::new(tpl(tr(self.lang(), "btn_delete"), &[])))
+                            .clicked()
+                        {
+                            self.delete_confirm = Some(self.selected_server);
+                        }
+                    });
+                });
+                ui.add_space(4.0);
+            });
+
+        // Heading + server list fill the remaining space
         ui.add_space(6.0);
         ui.heading(tpl(tr(self.lang(), "list_title"), &[]));
         ui.add_space(4.0);
         ui.separator();
-
-        // Server list fills the remaining space.
-        // NOTE: the list height is computed BEFORE entering the ScrollArea — using
-        // available_height inside the closure would feed content size back into the
-        // layout and grow every repaint.
-        let btn_h = 78.0; // reserved height for the button area below
-        let list_height = (ui.available_height() - btn_h).max(60.0);
         egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.set_min_height(list_height);
             for i in 0..self.servers.len() {
                 let name = self.servers[i].name.clone();
                 let host = format!(
                     "{}@{}:{}",
                     self.servers[i].username, self.servers[i].host, self.servers[i].port
                 );
-                let resp = ui.selectable_label(i == self.selected_server, format!("{name}
+                let resp =
+                    ui.selectable_label(i == self.selected_server, format!("{name}
   {host}"));
                 if resp.clicked() {
                     self.selected_server = i;
@@ -427,58 +491,6 @@ impl XxsshgApp {
                 }
             }
         });
-
-        ui.separator();
-        ui.add_space(4.0);
-
-        // Primary action: Connect + hamburger (more) menu
-        let can_connect = !self.servers.is_empty() && self.selected_server < self.servers.len();
-        ui.horizontal(|ui| {
-            let lang = self.lang();
-            ui.add_enabled_ui(can_connect, |ui| {
-                let btn_w = ui.available_width() - 34.0;
-                let connect_btn = ui.add_sized(
-                    [btn_w, 26.0],
-                    egui::Button::new(egui::RichText::new(tpl(tr(lang, "btn_connect"), &[])).strong()),
-                );
-                if connect_btn.clicked() {
-                    self.connect_server(self.selected_server);
-                }
-            });
-            ui.menu_button("☰", |ui| {
-                if ui.button(tpl(tr(lang, "settings_title"), &[])).clicked() {
-                    self.settings_open = true;
-                    ui.close();
-                }
-                if ui.button(tpl(tr(lang, "menu_about"), &[])).clicked() {
-                    self.about_open = true;
-                    ui.close();
-                }
-            });
-        });
-        ui.add_space(4.0);
-
-        // Row: New / Edit / Delete
-        ui.horizontal(|ui| {
-            let w = [(ui.available_width() - 12.0) / 3.0, 22.0];
-            if ui.add_sized(w, egui::Button::new(tpl(tr(self.lang(), "btn_new"), &[]))).clicked() {
-                self.form = Some(ServerForm::new());
-                self.form_open = true;
-            }
-            let can_edit = !self.servers.is_empty() && self.selected_server < self.servers.len();
-            ui.add_enabled_ui(can_edit, |ui| {
-                if ui.add_sized(w, egui::Button::new(tpl(tr(self.lang(), "btn_edit"), &[]))).clicked() {
-                    let srv = self.servers[self.selected_server].clone();
-                    self.form = Some(ServerForm::from_server(self.selected_server, &srv));
-                    self.form_open = true;
-                }
-                if ui.add_sized(w, egui::Button::new(tpl(tr(self.lang(), "btn_delete"), &[]))).clicked() {
-                    self.delete_confirm = Some(self.selected_server);
-                }
-            });
-        });
-        ui.add_space(4.0);
-
     }
 
     fn tabs_bar(&mut self, ui: &mut egui::Ui) {
