@@ -1,0 +1,26 @@
+[package]
+name = "xxsshg"
+version = "0.1.0"
+edition = "2021"
+description = "xxssh GUI: lightweight graphical SSH client sharing xxssh's config"
+license = "MIT"
+
+[dependencies]
+# GUI (MIT/Apache-2.0); glow renderer, persistence for window state
+eframe = { version = "0.36", default-features = false, features = ["default_fonts", "glow", "persistence"] }
+# Terminal emulator core (Apache-2.0): VT/xterm parsing + grid + scrollback, no GUI deps
+alacritty_terminal = "0.26"
+# SSH protocol (Apache-2.0); ring backend avoids cmake/nasm on Windows (same choice as xxssh)
+russh = { version = "0.62", default-features = false, features = ["ring", "rsa"] }
+tokio = { version = "1", features = ["rt", "macros", "io-util", "time", "sync", "fs", "net"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+dirs = "6"
+tokio-socks = "0.5"
+log = "0.4"
+env_logger = "0.11"
+image = { version = "0.25.10", default-features = false, features = ["png"] }
+egui = "0.36"
+
+[profile.release]
+opt-level = 2
