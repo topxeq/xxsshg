@@ -524,14 +524,15 @@ impl Terminal {
         if response.hovered() {
             let scroll = ui.input(|i| i.smooth_scroll_delta.y);
             if scroll.abs() > 0.5 {
-                let lines = (scroll / cell_h).round() as i32;
+                let dir: i32 = if invert_scrolling { -1 } else { 1 };
+                let lines = ((scroll / cell_h).round() as i32) * dir;
                 if mode.contains(TermMode::ALT_SCREEN) {
                     for _ in 0..lines.abs().min(10) {
                         let seq: &[u8] = if lines > 0 { b"\x1b[A" } else { b"\x1b[B" };
                         self.write(seq);
                     }
                 } else if lines != 0 {
-                    self.term.scroll_display(Scroll::Delta(-lines));
+                    self.term.scroll_display(Scroll::Delta(lines));
                 }
             }
         }

@@ -3,6 +3,10 @@
 //! Entry point: load configs from ~/.xxssh (servers.json / settings.json / gui.json),
 //! start a background tokio runtime for SSH sessions, and run the eframe GUI.
 
+// GUI app: no console window on Windows in release builds (debug keeps the console
+// for env_logger output)
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod app;
 mod gconfig;
 mod i18n;
