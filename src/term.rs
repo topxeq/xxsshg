@@ -354,8 +354,11 @@ impl Terminal {
                     run_style = Some(style);
                 }
                 if wide {
-                    // Wide char: render alone spanning two cells
-                    let had = run_style.take();
+                    // Wide char: flush the pending run FIRST (with its own style),
+                    // then render the wide char alone spanning two cells.
+                    // NB: the old `run_style.take()` before flush nulled the style so
+                    // the pending run was silently discarded — any ASCII text right
+                    // before a CJK char (shell prompt, typed English) vanished.
                     flush(&mut run, &mut run_col, &mut run_style, col_i, &painter, y);
                     let x = origin.x + col_i as f32 * cell_w;
                     if bg != default_bg {
@@ -375,7 +378,9 @@ impl Terminal {
                         bold_id.clone(),
                         fg,
                     );
-                    run_style = had;
+                    // Next real cell is the one after the wide char (its follower is
+                    // a spacer cell that is skipped above)
+                    run_col = (col_i + 2).min(self.cols as usize);
                 } else {
                     run.push(ch);
                 }
@@ -778,4 +783,60 @@ fn encode_key(key: egui::Key, mods: &egui::Modifiers, mode: &TermMode) -> Option
         Key::F12 => b"\x1b[24~".to_vec(),
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn dump_grid(t: &Terminal) -> String {
+        let grid = t.term.grid();
+        let mut out = String::new();
+        for row in 0..t.rows as i32 {
+            let line_abs = row - t.display_offset() as i32;
+            let grid_row = &grid[Line(line_abs)];
+            for col in 0..t.cols as usize {
+                let cell = &grid_row[Column(col)];
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                out.push(cell.c);
+            }
+            out.push('\n');
+        }
+        out
+    }
+
+    /// The motd+prompt byte stream as the real server sends it must end up in the grid
+    #[test]
+    fn prompt_survives_feed_and_resize() {
+        let (input_tx, _rx) = mpsc::unbounded_channel();
+        let (mut t, _title, _bell) = Terminal::new(80, 24, 10000, input_tx);
+        t.feed(b"Last login: Sat Aug 29 19:07:01 2026 from 1.2.3.4\r\n\r\n");
+        t.feed(b"\x1b[?2004h\x1b]0;root@ecs-6b17-xhw01: ~\x07root@ecs-6b17-xhw01:~# ");
+        let text = dump_grid(&t);
+        assert!(text.contains("Last login"), "motd line missing: {text:?}");
+        assert!(text.contains("root@ecs-6b17-xhw01:~#"), "PROMPT MISSING: {text:?}");
+
+        // ... and it must still be there after the GUI's first-paint resize
+        t.resize(120, 30);
+        let text = dump_grid(&t);
+        assert!(text.contains("root@ecs-6b17-xhw01:~#"), "prompt lost after resize: {text:?}");
+    }
+
+    /// Replays the exact byte stream captured from a real GUI session (XXSSHG_PTY_DUMP).
+    /// Run with XXSSHG_PTY_TEST=<file> --nocapture to dump the resulting grid.
+    #[test]
+    fn replay_captured_stream() {
+        let Ok(path) = std::env::var("XXSSHG_PTY_TEST") else { return };
+        let bytes = std::fs::read(&path).unwrap();
+        let (input_tx, _rx) = mpsc::unbounded_channel();
+        let (mut t, _title, _bell) = Terminal::new(80, 24, 10000, input_tx);
+        t.feed(&bytes);
+        t.resize(118, 33);
+        let text = dump_grid(&t);
+        println!("=== GRID DUMP ===
+{text}=== END ===");
+        assert!(text.contains("root@ecs-6b17-xhw01:~#"), "PROMPT MISSING from replayed stream");
+    }
 }

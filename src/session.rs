@@ -893,6 +893,9 @@ mod e2e_tests {
                         tokio::select! {
                             out = handle.output_rx.recv() => {
                                 if let Some(bytes) = out {
+                                    if std::env::var("XXSSHG_E2E_DUMP").is_ok() {
+                                        print!("{}", String::from_utf8_lossy(&bytes));
+                                    }
                                     if bytes.windows(13).any(|w| w == b"xxsshg_e2e_ok") {
                                         got_out = true;
                                     }

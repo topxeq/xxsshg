@@ -352,6 +352,12 @@ impl XxsshgApp {
                 &mut self.tabs[i]
             {
                 while let Some(bytes) = handle.output_rx.try_recv().ok() {
+                    if let Ok(path) = std::env::var("XXSSHG_PTY_DUMP") {
+                        use std::io::Write;
+                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+                            let _ = f.write_all(&bytes);
+                        }
+                    }
                     term.feed(&bytes);
                 }
                 while let Some(title) = title_rx.try_recv().ok() {
