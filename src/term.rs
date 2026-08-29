@@ -262,7 +262,10 @@ impl Terminal {
         let ppp = ui.ctx().pixels_per_point();
         let q = |v: f32| (v * ppp).round() / ppp;
         let cell_w = q(ui.ctx().fonts_mut(|f| f.glyph_width(&font_id, 'M')).max(1.0)).max(1.0);
-        let cell_h = q(font_size * 1.25).max(1.0);
+        // Use egui's own recommended row height for the font: a fixed 1.25x guess
+        // drifts from the real glyph metrics as the font size changes, making rows
+        // overlap (ghosting) and the cursor block sit misaligned.
+        let cell_h = q(ui.ctx().fonts_mut(|f| f.row_height(&font_id)).max(font_size)).max(1.0);
         let origin = egui::pos2(q(rect.min.x), q(rect.min.y));
         self.cell_w = cell_w;
         self.cell_h = cell_h;
@@ -879,5 +882,43 @@ mod tests {
         println!("=== GRID DUMP ===
 {text}=== END ===");
         assert!(text.contains("root@ecs-6b17-xhw01:~#"), "PROMPT MISSING from replayed stream");
+    }
+}
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+
+    fn dump(t: &Terminal) -> String {
+        let grid = t.term.grid();
+        let mut out = String::new();
+        for row in 0..t.rows as i32 {
+            let grid_row = &grid[Line(row - t.display_offset() as i32)];
+            for col in 0..t.cols as usize {
+                out.push(grid_row[Column(col)].c);
+            }
+            out.push(chr_nl());
+        }
+        out
+    }
+    fn chr_nl() -> char { '\n' }
+
+    #[test]
+    fn cursor_tracks_resize() {
+        let (input_tx, _rx) = mpsc::unbounded_channel();
+        let (mut t, _ti, _be) = Terminal::new(80, 24, 10000, input_tx);
+        t.feed(b"prompt> ");
+        let p1 = t.term.grid().cursor.point;
+        assert_eq!((p1.line.0, p1.column.0), (0, 8), "before resize");
+        // font size grows: viewport shrinks
+        t.resize(40, 10);
+        let p2 = t.term.grid().cursor.point;
+        println!("after resize: line={} col={}, offset={}", p2.line.0, p2.column.0, t.display_offset());
+        assert_eq!((p2.line.0, p2.column.0), (0, 8), "cursor must keep its cell after resize");
+        // grow viewport back
+        t.resize(80, 24);
+        let p3 = t.term.grid().cursor.point;
+        assert_eq!((p3.line.0, p3.column.0), (0, 8), "cursor must keep its cell after grow");
+        let _ = dump(&t);
     }
 }
