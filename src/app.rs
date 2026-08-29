@@ -403,7 +403,7 @@ impl XxsshgApp {
         // out of the visible area by the server list.
         egui::Panel::bottom(egui::Id::new("sidebar_actions"))
             .resizable(false)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.add_space(4.0);
 
                 // Primary action: Connect + hamburger (more) menu
