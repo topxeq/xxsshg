@@ -114,6 +114,10 @@ pub struct Terminal {
     drag_anchor: Option<SelPoint>,
     /// Whether we enabled IME for the window (terminal focused)
     ime_allowed: bool,
+    /// True while an IME composition is in progress (pinyin being edited):
+    /// raw key presses in this window must NOT reach the remote, or editing
+    /// the pinyin (backspace etc.) would delete text already typed.
+    composing: bool,
 }
 
 impl Terminal {
@@ -146,6 +150,7 @@ impl Terminal {
                 selection: None,
                 drag_anchor: None,
                 ime_allowed: false,
+                composing: false,
             },
             title_rx,
             bell_rx,
@@ -506,17 +511,30 @@ impl Terminal {
             let events = ui.input(|i| i.events.clone());
             for ev in events {
                 match ev {
-                    egui::Event::Ime(egui::ImeEvent::Commit(text)) => {
-                        // IME composition finished (Chinese/Japanese/Korean input)
-                        let bytes = text
-                            .chars()
-                            .filter(|&c| c >= ' ')
-                            .collect::<String>()
-                            .into_bytes();
-                        if !bytes.is_empty() {
-                            self.write(&bytes);
+                    egui::Event::Ime(ime) => match ime {
+                        egui::ImeEvent::Preedit { text, .. } => {
+                            // Composition in progress: swallow raw keys until Commit
+                            self.composing = !text.is_empty();
                         }
-                    }
+                        egui::ImeEvent::Commit(text) => {
+                            // IME composition finished (Chinese/Japanese/Korean input)
+                            self.composing = false;
+                            let bytes = text
+                                .chars()
+                                .filter(|&c| c >= ' ')
+                                .collect::<String>()
+                                .into_bytes();
+                            if !bytes.is_empty() {
+                                self.write(&bytes);
+                            }
+                        }
+                        _ => {}
+                    },
+                    // While the user is editing pinyin, winit still leaks the raw
+                    // key events to us (egui only filters them when a TextEdit has
+                    // focus) — dropping everything keeps the remote untouched.
+                    egui::Event::Key { .. } if self.composing => {}
+                    egui::Event::Text(_) if self.composing => {}
                     egui::Event::Text(text) => {
                         // Printable / IME-committed text
                         let bytes = text
