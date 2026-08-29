@@ -317,63 +317,27 @@ impl Terminal {
         let default_bg = self.resolve_color(Color::Named(NamedColor::Background), ui);
         painter.rect_filled(rect, 0.0, default_bg);
 
-        let bold_id = egui::FontId::new(font_size, egui::FontFamily::Monospace);
+        let mono_id = egui::FontId::new(font_size, egui::FontFamily::Monospace);
 
+        // Render PER CELL at absolute grid coordinates. Batching runs through the
+        // text layouter measures advances slightly differently than the grid steps,
+        // and any sub-pixel mismatch accumulates along the line — the cursor block
+        // (also positioned on the grid) would visibly lag behind the text.
         for row_i in 0..self.rows as i32 {
             let line_abs = row_i - offset as i32;
             let grid_row = &grid[Line(line_abs)];
-            let y = origin.y + row_i as f32 * cell_h;
-
-            // Render as runs of same-style cells to limit paint calls
-            let mut run = String::new();
-            let mut run_col = 0usize;
-            let mut run_style: Option<(egui::Color32, egui::Color32, bool)> = None;
-
-            let flush = |run: &mut String,
-                         run_col: &mut usize,
-                         run_style: &mut Option<(egui::Color32, egui::Color32, bool)>,
-                         end_col: usize,
-                         painter: &egui::Painter,
-                         y: f32| {
-                if let Some((fg, bg, underline)) = *run_style {
-                    if !run.is_empty() {
-                        let x = origin.x + *run_col as f32 * cell_w;
-                        let w = (end_col - *run_col).max(1) as f32 * cell_w;
-                        if bg != default_bg {
-                            painter.rect_filled(
-                                egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, cell_h)),
-                                0.0,
-                                bg,
-                            );
-                        }
-                        painter.text(
-                            egui::pos2(x, q(y + cell_h * 0.5)),
-                            egui::Align2::LEFT_CENTER,
-                            run.as_str(),
-                            bold_id.clone(),
-                            fg,
-                        );
-                        if underline {
-                            painter.line_segment(
-                                [
-                                    egui::pos2(x, y + cell_h - 1.0),
-                                    egui::pos2(x + w, y + cell_h - 1.0),
-                                ],
-                                egui::Stroke::new(1.0, fg),
-                            );
-                        }
-                    }
-                }
-                run.clear();
-                *run_col = end_col;
-                *run_style = None;
-            };
+            let y = q(origin.y + row_i as f32 * cell_h);
 
             for col_i in 0..self.cols as usize {
                 let cell = &grid_row[Column(col_i)];
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    continue;
+                }
                 let wide = cell.flags.contains(Flags::WIDE_CHAR);
-                let spacer = cell.flags.contains(Flags::WIDE_CHAR_SPACER);
-                let ch = if spacer { continue } else { cell.c };
+                let ch = cell.c;
+                if ch == ' ' && !cell.flags.contains(Flags::INVERSE) && !wide {
+                    continue; // blank default cell: nothing to draw
+                }
 
                 let fg = self.resolve_color(cell.fg, ui);
                 let mut bg = self.resolve_color(cell.bg, ui);
@@ -383,73 +347,31 @@ impl Terminal {
                 }
                 let underline = cell.flags.intersects(Flags::UNDERLINE);
 
-                let style = (fg, bg, underline);
-                let style_changed = match run_style {
-                    None => {
-                        run_style = Some(style);
-                        false
-                    }
-                    Some(s) => s != style,
-                };
-                if style_changed {
-                    flush(&mut run, &mut run_col, &mut run_style, col_i, &painter, y);
-                    run_style = Some(style);
-                }
-                if wide {
-                    // Wide char: flush the pending run FIRST (with its own style),
-                    // then render the wide char alone spanning two cells.
-                    // NB: the old `run_style.take()` before flush nulled the style so
-                    // the pending run was silently discarded — any ASCII text right
-                    // before a CJK char (shell prompt, typed English) vanished.
-                    flush(&mut run, &mut run_col, &mut run_style, col_i, &painter, y);
-                    let x = origin.x + col_i as f32 * cell_w;
-                    if bg != default_bg {
-                        painter.rect_filled(
-                            egui::Rect::from_min_size(
-                                egui::pos2(x, y),
-                                egui::vec2(cell_w * 2.0, cell_h),
-                            ),
-                            0.0,
-                            bg,
-                        );
-                    }
-                    painter.text(
-                        egui::pos2(x, q(y + cell_h * 0.5)),
-                        egui::Align2::LEFT_CENTER,
-                        ch.to_string(),
-                        bold_id.clone(),
-                        fg,
-                    );
-                    // Next real cell is the one after the wide char (its follower is
-                    // a spacer cell that is skipped above)
-                    run_col = (col_i + 2).min(self.cols as usize);
-                } else {
-                    run.push(ch);
-                }
-            }
-            flush(&mut run, &mut run_col, &mut run_style, self.cols as usize, &painter, y);
-        }
+                let x = q(origin.x + col_i as f32 * cell_w);
+                let cells = if wide { 2.0 } else { 1.0 };
+                let w = cell_w * cells;
 
-        // Selection highlight overlay
-        if let Some((a, b)) = self.selection {
-            let (start, end) = if (a.line, a.col) <= (b.line, b.col) { (a, b) } else { (b, a) };
-            for row_i in 0..self.rows as i32 {
-                let line_abs = row_i - offset as i32;
-                if line_abs < start.line || line_abs > end.line {
-                    continue;
-                }
-                let col_start = if line_abs == start.line { start.col } else { 0 };
-                let col_end = if line_abs == end.line { end.col + 1 } else { self.cols as usize };
-                let x = origin.x + col_start as f32 * cell_w;
-                let w = ((col_end - col_start) as f32 * cell_w).min(rect.max.x - x);
-                if w > 0.0 {
+                if bg != default_bg || cell.flags.contains(Flags::INVERSE) {
                     painter.rect_filled(
-                        egui::Rect::from_min_size(
-                            egui::pos2(x, origin.y + row_i as f32 * cell_h),
-                            egui::vec2(w, cell_h),
-                        ),
+                        egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, cell_h)),
                         0.0,
-                        egui::Color32::from_rgba_unmultiplied(120, 160, 255, 90),
+                        bg,
+                    );
+                }
+                painter.text(
+                    egui::pos2(x, q(y + cell_h * 0.5)),
+                    egui::Align2::LEFT_CENTER,
+                    ch.to_string(),
+                    mono_id.clone(),
+                    fg,
+                );
+                if underline {
+                    painter.line_segment(
+                        [
+                            egui::pos2(x, y + cell_h - 1.0),
+                            egui::pos2(x + w, y + cell_h - 1.0),
+                        ],
+                        egui::Stroke::new(1.0, fg),
                     );
                 }
             }
@@ -472,7 +394,7 @@ impl Terminal {
                     egui::pos2(px, q(py + cell_h * 0.5)),
                     egui::Align2::LEFT_CENTER,
                     &self.preedit,
-                    bold_id.clone(),
+                    mono_id.clone(),
                     egui::Color32::WHITE,
                 );
             }
