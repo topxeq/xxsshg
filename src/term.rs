@@ -509,6 +509,14 @@ impl Terminal {
         // Keyboard input when focused
         if focused {
             let events = ui.input(|i| i.events.clone());
+            // Pre-pass: IME state first. Within a frame, key events arrive BEFORE
+            // the Preedit update for the same keystroke, so handling them in order
+            // would leak the first key of every composition.
+            for ev in &events {
+                if let egui::Event::Ime(egui::ImeEvent::Preedit { text, .. }) = ev {
+                    self.composing = !text.is_empty();
+                }
+            }
             for ev in events {
                 match ev {
                     egui::Event::Ime(ime) => match ime {
