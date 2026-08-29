@@ -522,6 +522,21 @@ impl Terminal {
         // IME: enable composition while the terminal has focus, and park the
         // composition window at the terminal cursor position.
         let focused = response.has_focus();
+        // Claim exclusive access to Tab / arrows / Escape while focused, so egui
+        // does not use them for focus navigation (Tab used to jump to the sidebar)
+        if focused {
+            ui.memory_mut(|mem| {
+                mem.set_focus_lock_filter(
+                    response.id,
+                    egui::EventFilter {
+                        tab: true,
+                        horizontal_arrows: true,
+                        vertical_arrows: true,
+                        escape: true,
+                    },
+                );
+            });
+        }
         if focused != self.ime_allowed {
             self.ime_allowed = focused;
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::IMEAllowed(focused));
