@@ -176,6 +176,7 @@ pub struct XxsshgApp {
     delete_confirm: Option<usize>,
     question: Option<PendingQuestion>,
     settings_open: bool,
+    about_open: bool,
     quit_confirm: bool,
     status_msg: Option<(String, std::time::Instant)>,
     autoconnect_done: bool,
@@ -207,6 +208,7 @@ impl XxsshgApp {
             delete_confirm: None,
             question: None,
             settings_open: false,
+            about_open: false,
             quit_confirm: false,
             status_msg: None,
             autoconnect_done: false,
@@ -416,16 +418,30 @@ impl XxsshgApp {
         ui.separator();
         ui.add_space(4.0);
 
-        // Primary action: full-width Connect
+        // Primary action: Connect + hamburger (more) menu
         let can_connect = !self.servers.is_empty() && self.selected_server < self.servers.len();
-        ui.add_enabled_ui(can_connect, |ui| {
-            let connect_btn = ui.add_sized(
-                [ui.available_width(), 26.0],
-                egui::Button::new(egui::RichText::new(tpl(tr(self.lang(), "btn_connect"), &[])).strong()),
-            );
-            if connect_btn.clicked() {
-                self.connect_server(self.selected_server);
-            }
+        ui.horizontal(|ui| {
+            let lang = self.lang();
+            ui.add_enabled_ui(can_connect, |ui| {
+                let btn_w = ui.available_width() - 34.0;
+                let connect_btn = ui.add_sized(
+                    [btn_w, 26.0],
+                    egui::Button::new(egui::RichText::new(tpl(tr(lang, "btn_connect"), &[])).strong()),
+                );
+                if connect_btn.clicked() {
+                    self.connect_server(self.selected_server);
+                }
+            });
+            ui.menu_button("☰", |ui| {
+                if ui.button(tpl(tr(lang, "settings_title"), &[])).clicked() {
+                    self.settings_open = true;
+                    ui.close();
+                }
+                if ui.button(tpl(tr(lang, "menu_about"), &[])).clicked() {
+                    self.about_open = true;
+                    ui.close();
+                }
+            });
         });
         ui.add_space(4.0);
 
@@ -450,13 +466,6 @@ impl XxsshgApp {
         });
         ui.add_space(4.0);
 
-        // Row: Settings
-        ui.horizontal(|ui| {
-            if ui.button(format!("⚙ {}", tpl(tr(self.lang(), "settings_title"), &[]))).clicked() {
-                self.settings_open = true;
-            }
-        });
-        ui.add_space(4.0);
     }
 
     fn tabs_bar(&mut self, ui: &mut egui::Ui) {
@@ -855,6 +864,37 @@ impl XxsshgApp {
                 });
             if close {
                 self.settings_open = false;
+            }
+        }
+
+        // About dialog
+        if self.about_open {
+            let lang = self.lang();
+            let mut close = false;
+            egui::Window::new(tpl(tr(lang, "menu_about"), &[]))
+                .collapsible(false)
+                .resizable(false)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.add(egui::Image::new(egui::include_image!("../assets/xxssh-icon.png")).max_size([32.0, 32.0].into()));
+                        ui.vertical(|ui| {
+                            ui.heading(egui::RichText::new(format!(
+                                "xxsshg v{} ({})",
+                                env!("CARGO_PKG_VERSION"),
+                                env!("XXSSHG_BUILD_HASH")
+                            )).strong());
+                            ui.label(egui::RichText::new(tr(lang, "about_text")).weak());
+                        });
+                    });
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui.button(tr(lang, "btn_ok")).clicked() {
+                            close = true;
+                        }
+                    });
+                });
+            if close {
+                self.about_open = false;
             }
         }
 

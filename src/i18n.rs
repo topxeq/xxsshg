@@ -65,6 +65,17 @@ const T: &[(&str, &str, &str, &str)] = &[
     ("btn_save", "Save", "保存", "儲存"),
     ("btn_cancel", "Cancel", "取消", "取消"),
     ("btn_close_tab", "Close", "关闭", "關閉"),
+    ("menu_about", "About", "关于", "關於"),
+    ("about_text", "A lightweight GUI SSH client sharing xxssh's config.
+Single binary, no runtime dependencies.
+
+Config: ~/.xxssh (servers.json / settings.json / gui.json)", "轻量级图形 SSH 客户端，与 xxssh 共用配置。
+单文件运行，无运行时依赖。
+
+配置目录：~/.xxssh（servers.json / settings.json / gui.json）", "輕量級圖形 SSH 用戶端，與 xxssh 共用設定。
+單一檔案執行，無執行時依賴。
+
+設定目錄：~/.xxssh（servers.json / settings.json / gui.json）"),
     ("err_name_required", "Name is required", "名称不能为空", "名稱不能為空"),
     ("err_host_required", "Host is required", "主机不能为空", "主機不能為空"),
     // ---- terminal / session ----
