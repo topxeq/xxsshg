@@ -28,6 +28,9 @@ fn resolve_opts(server: &Server, settings: &AppSettings) -> ConnectOpts {
         connect_timeout: None,
         known_hosts: None,
         known_hosts_add: None,
+        // Persistent TOFU store: trust once, later connects skip the dialog
+        host_keystore: dirs::home_dir()
+            .map(|h| h.join(".xxssh").join("known_hosts").to_string_lossy().into_owned()),
     }
 }
 
@@ -150,6 +153,7 @@ enum Question {
         host: String,
         port: u16,
         fingerprint: String,
+        changed: bool,
         respond: Option<oneshot::Sender<bool>>,
     },
 }
@@ -284,8 +288,8 @@ impl XxsshgApp {
                                 ConnectRequest::Passphrase { path, respond } => {
                                     Question::Passphrase { path, respond: Some(respond), input: String::new() }
                                 }
-                                ConnectRequest::HostKey { host, port, fingerprint, respond } => {
-                                    Question::HostKey { host, port, fingerprint, respond: Some(respond) }
+                                ConnectRequest::HostKey { host, port, fingerprint, changed, respond } => {
+                                    Question::HostKey { host, port, fingerprint, changed, respond: Some(respond) }
                                 }
                             },
                         });
@@ -732,12 +736,18 @@ impl XxsshgApp {
                         done = true;
                     }
                 }
-                Question::HostKey { host, port, fingerprint, respond } => {
+                Question::HostKey { host, port, fingerprint, changed, respond } => {
                     let mut answer: Option<bool> = None;
                     egui::Window::new(tr(lang, "hk_title"))
                         .collapsible(false)
                         .resizable(false)
                         .show(ui, |ui| {
+                            if *changed {
+                                ui.colored_label(
+                                    egui::Color32::LIGHT_RED,
+                                    tr(lang, "hk_changed_warning"),
+                                );
+                            }
                             ui.label(tpl(tr(lang, "hk_unknown"), &[
                                 ("host", host),
                                 ("port", &port.to_string()),

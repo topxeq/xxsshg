@@ -112,6 +112,8 @@ pub struct Terminal {
     rows: u16,
     selection: Option<(SelPoint, SelPoint)>,
     drag_anchor: Option<SelPoint>,
+    /// Whether we enabled IME for the window (terminal focused)
+    ime_allowed: bool,
 }
 
 impl Terminal {
@@ -143,6 +145,7 @@ impl Terminal {
                 rows,
                 selection: None,
                 drag_anchor: None,
+                ime_allowed: false,
             },
             title_rx,
             bell_rx,
@@ -479,11 +482,41 @@ impl Terminal {
             }
         }
 
+        // IME: enable composition while the terminal has focus, and park the
+        // composition window at the terminal cursor position.
+        let focused = response.has_focus();
+        if focused != self.ime_allowed {
+            self.ime_allowed = focused;
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::IMEAllowed(focused));
+        }
+        if focused {
+            let cp = self.term.grid().cursor.point;
+            let ime_rect = egui::Rect::from_min_size(
+                egui::pos2(
+                    origin.x + cp.column.0 as f32 * cell_w,
+                    origin.y + (cp.line.0 as f32 - offset as f32) * cell_h,
+                ),
+                egui::vec2(cell_w * 8.0, cell_h),
+            );
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::IMERect(ime_rect));
+        }
+
         // Keyboard input when focused
-        if response.has_focus() {
+        if focused {
             let events = ui.input(|i| i.events.clone());
             for ev in events {
                 match ev {
+                    egui::Event::Ime(egui::ImeEvent::Commit(text)) => {
+                        // IME composition finished (Chinese/Japanese/Korean input)
+                        let bytes = text
+                            .chars()
+                            .filter(|&c| c >= ' ')
+                            .collect::<String>()
+                            .into_bytes();
+                        if !bytes.is_empty() {
+                            self.write(&bytes);
+                        }
+                    }
                     egui::Event::Text(text) => {
                         // Printable / IME-committed text
                         let bytes = text

@@ -84,6 +84,7 @@ const T: &[(&str, &str, &str, &str)] = &[
     ("btn_ok", "OK", "确定", "確定"),
     // ---- host key dialog ----
     ("hk_title", "Host key verification", "主机指纹确认", "主機指紋確認"),
+    ("hk_changed_warning", "WARNING: this host's key DIFFERS from the stored one. The connection may be intercepted, or the server was reinstalled.", "警告：该主机的密钥与已保存的不一致！连接可能被劫持，或服务器重装过。", "警告：該主機的密鑰與已儲存的不一致！連線可能被劫持，或伺服器重裝過。"),
     ("hk_unknown", "Unknown host key for {host}:{port}\n\nFingerprint (SHA256):\n{fp}\n\nTrust this host?", "首次连接 {host}:{port}，未知主机指纹：\n\nSHA256 指纹：\n{fp}\n\n是否信任该主机？", "首次連線 {host}:{port}，未知主機指紋：\n\nSHA256 指紋：\n{fp}\n\n是否信任該主機？"),
     ("hk_accept", "Trust & connect", "信任并连接", "信任並連線"),
     ("hk_reject", "Reject", "拒绝", "拒絕"),

@@ -46,16 +46,21 @@ pub struct ConnectOpts {
     pub known_hosts: Option<String>,
     /// TOFU known_hosts file: unknown hosts are learned; mismatches rejected
     pub known_hosts_add: Option<String>,
+    /// GUI TOFU store (~/.xxssh/known_hosts): unknown keys trigger an interactive
+    /// confirm dialog, accepted keys are persisted so later connects skip the dialog.
+    pub host_keystore: Option<String>,
 }
 
 /// A question the session task asks the UI while connecting; the UI polls these
 /// each frame, shows a dialog, and answers through the oneshot responder.
 pub enum ConnectRequest {
-    /// Unknown host key — UI shows the fingerprint and answers true (trust) / false (reject)
+    /// Unknown (or CHANGED when `changed`) host key — UI shows the fingerprint and
+    /// answers true (trust) / false (reject)
     HostKey {
         host: String,
         port: u16,
         fingerprint: String,
+        changed: bool,
         respond: oneshot::Sender<bool>,
     },
     /// Password needed (none stored) — UI shows a password box; None = cancel
@@ -259,6 +264,7 @@ async fn connect_and_open(
         port: server.port,
         policy_strict: opts.known_hosts.clone(),
         policy_learn: opts.known_hosts_add.clone(),
+        keystore: opts.host_keystore.clone(),
         requests: requests.clone(),
         approved: HashSet::new(),
         reject_reason: None,
@@ -561,8 +567,11 @@ struct Handler {
     port: u16,
     policy_strict: Option<String>,
     policy_learn: Option<String>,
+    /// GUI TOFU store: accepted host keys are persisted here so the confirm
+    /// dialog only appears on the first connect (or after a key change)
+    keystore: Option<String>,
     requests: mpsc::UnboundedSender<ConnectRequest>,
-    /// Fingerprints approved interactively during this connection (no policy case)
+    /// Fingerprints approved during this connection (only when no keystore)
     approved: HashSet<String>,
     /// Human-readable rejection reason surfaced to the UI on failure
     reject_reason: Option<String>,
@@ -627,8 +636,21 @@ impl client::Handler for Handler {
             };
         }
 
-        // No file policy: interactive confirm (per-connection memory)
-        if self.approved.contains(&fp) {
+        // No explicit file policy: persistent TOFU keystore + interactive confirm.
+        let mut changed = false;
+        if let Some(file) = &self.keystore {
+            match russh::keys::known_hosts::check_known_hosts_path(
+                &self.host,
+                self.port,
+                key,
+                file,
+            ) {
+                Ok(true) => return Ok(true),
+                Err(russh::keys::Error::KeyChanged { .. }) => changed = true,
+                _ => {}
+            }
+        }
+        if !changed && self.approved.contains(&fp) {
             return Ok(true);
         }
         let (tx, rx) = oneshot::channel();
@@ -638,6 +660,7 @@ impl client::Handler for Handler {
                 host: self.host.clone(),
                 port: self.port,
                 fingerprint: fp.clone(),
+                changed,
                 respond: tx,
             })
             .is_err()
@@ -646,11 +669,61 @@ impl client::Handler for Handler {
         }
         match rx.await {
             Ok(true) => {
-                self.approved.insert(fp);
+                if let Some(file) = &self.keystore {
+                    if changed {
+                        // A different key was recorded for this host: drop the stale
+                        // entries before appending, or every later check still fails
+                        // with KeyChanged (russh's learn only appends).
+                        remove_known_host_entries(file, &self.host, self.port);
+                    }
+                    if russh::keys::known_hosts::learn_known_hosts_path(
+                        &self.host,
+                        self.port,
+                        key,
+                        file,
+                    )
+                    .is_err()
+                    {
+                        // Persist failed: still allow this connection
+                        self.approved.insert(fp);
+                    }
+                } else {
+                    self.approved.insert(fp);
+                }
                 Ok(true)
             }
-            _ => Ok(false),
+            _ => {
+                self.reject_reason = Some(if changed {
+                    format!("host key CHANGED for {}:{} ({fp})", self.host, self.port)
+                } else {
+                    format!("host key rejected by user ({fp})")
+                });
+                Ok(false)
+            }
         }
+    }
+}
+
+/// Remove all existing known_hosts lines for host:port (used when accepting a
+/// changed host key). Line numbers come from russh's `known_host_keys_path`.
+fn remove_known_host_entries(file: &str, host: &str, port: u16) {
+    let Ok(entries) = russh::keys::known_hosts::known_host_keys_path(host, port, file) else {
+        return;
+    };
+    if entries.is_empty() {
+        return;
+    }
+    let drop_lines: HashSet<usize> = entries.into_iter().map(|(line, _)| line).collect();
+    if let Ok(text) = std::fs::read_to_string(file) {
+        let kept: Vec<&str> = text
+            .lines()
+            .enumerate()
+            .filter(|(n, _)| !drop_lines.contains(&(n + 1)))
+            .map(|(_, l)| l)
+            .collect();
+        let _ = std::fs::write(file, kept.join("
+") + "
+");
     }
 }
 
