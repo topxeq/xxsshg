@@ -118,6 +118,9 @@ pub struct Terminal {
     /// raw key presses in this window must NOT reach the remote, or editing
     /// the pinyin (backspace etc.) would delete text already typed.
     composing: bool,
+    /// Current IME composition text, rendered inline at the terminal cursor
+    /// (like a real terminal: the user sees the pinyin while typing it)
+    preedit: String,
 }
 
 impl Terminal {
@@ -151,6 +154,7 @@ impl Terminal {
                 drag_anchor: None,
                 ime_allowed: false,
                 composing: false,
+                preedit: String::new(),
             },
             title_rx,
             bell_rx,
@@ -404,6 +408,29 @@ impl Terminal {
             }
         }
 
+        // IME composition rendered inline at the cursor (like a real terminal):
+        // the pinyin is buffer-local — it only reaches the remote on commit.
+        if !self.preedit.is_empty() && offset == 0 {
+            let cp = grid.cursor.point;
+            if (cp.line.0 as usize) < self.rows as usize {
+                let px = origin.x + cp.column.0 as f32 * cell_w;
+                let py = origin.y + cp.line.0 as f32 * cell_h;
+                let w = self.preedit.chars().count() as f32 * cell_w;
+                painter.rect_filled(
+                    egui::Rect::from_min_size(egui::pos2(px, py), egui::vec2(w.max(cell_w), cell_h)),
+                    0.0,
+                    egui::Color32::from_rgba_unmultiplied(70, 110, 190, 120),
+                );
+                painter.text(
+                    egui::pos2(px, py + cell_h * 0.5),
+                    egui::Align2::LEFT_CENTER,
+                    &self.preedit,
+                    bold_id.clone(),
+                    egui::Color32::WHITE,
+                );
+            }
+        }
+
         // Cursor (only on the visible screen when not scrolled into history)
         if offset == 0 {
             let cp = grid.cursor.point;
@@ -501,7 +528,10 @@ impl Terminal {
                     origin.x + cp.column.0 as f32 * cell_w,
                     origin.y + (cp.line.0 as f32 - offset as f32) * cell_h,
                 ),
-                egui::vec2(cell_w * 8.0, cell_h),
+                egui::vec2(
+                    (self.preedit.chars().count().max(8)) as f32 * cell_w,
+                    cell_h,
+                ),
             );
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::IMERect(ime_rect));
         }
@@ -515,6 +545,7 @@ impl Terminal {
             for ev in &events {
                 if let egui::Event::Ime(egui::ImeEvent::Preedit { text, .. }) = ev {
                     self.composing = !text.is_empty();
+                    self.preedit = text.clone();
                 }
             }
             for ev in events {
@@ -525,8 +556,10 @@ impl Terminal {
                             self.composing = !text.is_empty();
                         }
                         egui::ImeEvent::Commit(text) => {
-                            // IME composition finished (Chinese/Japanese/Korean input)
+                            // IME composition finished: Space commits the converted
+                            // CJK text, Enter commits the raw pinyin letters.
                             self.composing = false;
+                            self.preedit.clear();
                             let bytes = text
                                 .chars()
                                 .filter(|&c| c >= ' ')
