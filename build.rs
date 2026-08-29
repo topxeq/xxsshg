@@ -1,4 +1,5 @@
-//! Capture the git short hash at build time for the title bar (best effort).
+//! Build-time metadata: embed the git short hash and (on Windows) the
+//! application icon + version info as exe resources.
 
 fn main() {
     let hash = std::process::Command::new("git")
@@ -10,6 +11,17 @@ fn main() {
         .unwrap_or_else(|| "dev".into());
     println!("cargo:rustc-env=XXSSHG_BUILD_HASH={hash}");
     // Rebuild when HEAD moves so the build number stays fresh
-    println!("cargo:rerun-if-changed=../repo-gui/.git/HEAD");
     println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=build.rs");
+
+    #[cfg(windows)]
+    {
+        let mut res = winresource::WindowsResource::new();
+        res.set_icon("assets/xxssh-icon.ico");
+        res.set("FileDescription", "xxsshg - lightweight GUI SSH client");
+        res.set("ProductName", "xxsshg");
+        if let Err(e) = res.compile() {
+            println!("cargo:warning=failed to compile Windows resources: {e}");
+        }
+    }
 }
