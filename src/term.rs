@@ -630,24 +630,30 @@ impl Terminal {
                         pressed: true,
                         ..
                     } => {
-                        // Copy/paste shortcuts
-                        if modifiers.ctrl && modifiers.shift {
-                            match key {
-                                egui::Key::C => {
-                                    if let Some(text) = self.selection_text() {
-                                        ui.ctx().copy_text(text);
-                                    }
-                                    continue;
-                                }
-                                egui::Key::V => {
-                                    // winit delivers Ctrl+V as an Event::Paste below
-                                    continue;
-                                }
-                                _ => {}
-                            }
-                        }
+                        // NB: plain Ctrl+C / Ctrl+X / Ctrl+V never arrive here —
+                        // egui-winit converts them to Event::Copy / Cut / Paste below.
                         if let Some(bytes) = encode_key(key, &modifiers, &mode) {
                             self.write(&bytes);
+                        }
+                    }
+                    // egui-winit turns Ctrl+C into Copy and Ctrl+X into Cut BEFORE the
+                    // key reaches us. Windows Terminal convention: with a selection
+                    // they copy (and clear it); without, they send the real control
+                    // code so ^C can still interrupt remote commands.
+                    egui::Event::Copy => {
+                        if let Some(text) = self.selection_text() {
+                            ui.ctx().copy_text(text);
+                            self.selection = None;
+                        } else {
+                            self.write(&[0x03]);
+                        }
+                    }
+                    egui::Event::Cut => {
+                        if let Some(text) = self.selection_text() {
+                            ui.ctx().copy_text(text);
+                            self.selection = None;
+                        } else {
+                            self.write(&[0x18]);
                         }
                     }
                     egui::Event::Paste(text) => {
