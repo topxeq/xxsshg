@@ -890,9 +890,9 @@ mod e2e_tests {
                 if std::env::var("XXSSHG_E2E").ok().as_deref() == Some("2") {
                     use std::time::Duration;
                     rt.block_on(async {
-                        let _ = handle.input_tx.send(b"abasdfhakfd ".to_vec());
-                        tokio::time::sleep(Duration::from_millis(400)).await;
                         let _ = handle.input_tx.send("\u{662f}\u{7684}\u{9644}\u{8fd1}\u{53ef}\u{597d}\u{770b}".as_bytes().to_vec());
+                        tokio::time::sleep(Duration::from_millis(400)).await;
+                        let _ = handle.input_tx.send(b"abasdfhakfd ".to_vec());
                         tokio::time::sleep(Duration::from_millis(400)).await;
                         let _ = handle.input_tx.send(b" hjk and some more text to push this prompt line well beyond the seventy column width for wrap testing".to_vec());
                         tokio::time::sleep(Duration::from_millis(600)).await;

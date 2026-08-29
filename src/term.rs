@@ -121,6 +121,8 @@ pub struct Terminal {
     /// Current IME composition text, rendered inline at the terminal cursor
     /// (like a real terminal: the user sees the pinyin while typing it)
     preedit: String,
+    /// Ctrl+= / Ctrl+- pressed (zoom direction); consumed by the app after paint
+    pub pending_zoom: Option<f32>,
 }
 
 impl Terminal {
@@ -155,6 +157,7 @@ impl Terminal {
                 ime_allowed: false,
                 composing: false,
                 preedit: String::new(),
+                pending_zoom: None,
             },
             title_rx,
             bell_rx,
@@ -261,7 +264,21 @@ impl Terminal {
         // centering adds 0.5px) make stems blurry / ghosted on LCDs.
         let ppp = ui.ctx().pixels_per_point();
         let q = |v: f32| (v * ppp).round() / ppp;
-        let cell_w = q(ui.ctx().fonts_mut(|f| f.glyph_width(&font_id, 'M')).max(1.0)).max(1.0);
+        // Measure the real typographic ADVANCE (layout of 10 'M's / 10), not the
+        // glyph ink width: glyph_width('M') is the bounding-box width, which lacks
+        // the side bearings, so text drifts right cumulatively while the cursor
+        // block stays on its grid column — the cursor appears to lag behind.
+        let cell_w = q(
+            ui.ctx()
+                .fonts_mut(|f| {
+                    f.layout_no_wrap("MMMMMMMMMM".to_string(), font_id.clone(), egui::Color32::WHITE)
+                        .rect
+                        .width()
+                        / 10.0
+                })
+                .max(1.0),
+        )
+        .max(1.0);
         // Use egui's own recommended row height for the font: a fixed 1.25x guess
         // drifts from the real glyph metrics as the font size changes, making rows
         // overlap (ghosting) and the cursor block sit misaligned.
@@ -443,6 +460,22 @@ impl Terminal {
         }
 
         // Cursor (only on the visible screen when not scrolled into history)
+        // XXSSHG_DEBUG_CURSOR=1: overlay the model's cursor cell numbers to
+        // arbitrate "model vs draw" cursor-position disputes.
+        let debug_cursor = std::env::var("XXSSHG_DEBUG_CURSOR").is_ok();
+        if debug_cursor && offset == 0 {
+            let cp = grid.cursor.point;
+            painter.text(
+                egui::pos2(origin.x + 4.0, origin.y + 14.0),
+                egui::Align2::LEFT_CENTER,
+                format!(
+                    "cursor: line={} col={} | offset={} | rows={} cols={} | cw={:.2} ch={:.2}",
+                    cp.line.0, cp.column.0, offset, self.rows, self.cols, cell_w, cell_h
+                ),
+                egui::FontId::monospace(12.0),
+                egui::Color32::YELLOW,
+            );
+        }
         if offset == 0 {
             let cp = grid.cursor.point;
             if (cp.line.0 as usize) < self.rows as usize && (cp.column.0 as usize) < self.cols as usize {
@@ -636,6 +669,24 @@ impl Terminal {
                         pressed: true,
                         ..
                     } => {
+                        // Ctrl+= / Ctrl+- : font zoom (Ctrl+0 resets to 14)
+                        if modifiers.ctrl && !modifiers.shift {
+                            match key {
+                                egui::Key::Plus | egui::Key::Equals => {
+                                    self.pending_zoom = Some(1.0);
+                                    continue;
+                                }
+                                egui::Key::Minus => {
+                                    self.pending_zoom = Some(-1.0);
+                                    continue;
+                                }
+                                egui::Key::Num0 => {
+                                    self.pending_zoom = Some(f32::NAN); // NaN = reset
+                                    continue;
+                                }
+                                _ => {}
+                            }
+                        }
                         // NB: plain Ctrl+C / Ctrl+X / Ctrl+V never arrive here —
                         // egui-winit converts them to Event::Copy / Cut / Paste below.
                         if let Some(bytes) = encode_key(key, &modifiers, &mode) {
@@ -876,7 +927,19 @@ mod tests {
         let bytes = std::fs::read(&path).unwrap();
         let (input_tx, _rx) = mpsc::unbounded_channel();
         let (mut t, _title, _bell) = Terminal::new(80, 24, 10000, input_tx);
-        t.feed(&bytes);
+        // Split at the SIGWINCH redraw (^M ^[[K ^M) to reproduce the real GUI
+        // ordering: font change resizes the grid FIRST, then the redraw arrives.
+        let marker = b"\r\x1b[K\r".to_vec();
+        let split = bytes
+            .windows(marker.len())
+            .rposition(|w| w == marker.as_slice());
+        if let Some(pos) = split {
+            t.feed(&bytes[..pos]);
+            t.resize(70, 20); // the font-size change
+            t.feed(&bytes[pos..]);
+        } else {
+            t.feed(&bytes);
+        }
         t.resize(118, 33);
         let text = dump_grid(&t);
         println!("=== GRID DUMP ===

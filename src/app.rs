@@ -531,6 +531,14 @@ impl XxsshgApp {
                     return;
                 }
                 let resized = term.paint(ui, self.gcfg.font_size, self.gcfg.copy_on_select, self.gcfg.invert_scrolling);
+                if let Some(zoom) = term.pending_zoom.take() {
+                    if zoom.is_nan() {
+                        self.gcfg.font_size = 14.0;
+                    } else {
+                        self.gcfg.font_size = (self.gcfg.font_size + 2.0 * zoom).clamp(9.0, 28.0);
+                    }
+                    let _ = crate::gconfig::save(&self.gui_path, &self.gcfg);
+                }
                 if resized || !*resize_sent {
                     let (cols, rows) = term.grid_size();
                     let _ = handle.resize_tx.send((cols, rows));
