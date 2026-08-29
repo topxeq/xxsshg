@@ -460,9 +460,14 @@ impl XxsshgApp {
                 if resp.clicked() {
                     activate = Some(i);
                 }
-                if is_active && ui.small_button("×").clicked() {
-                    close = Some(i);
-                }
+                // Right-click on a tab opens its close menu (no inline × button:
+                // it sat right next to the label and was easy to mis-hit)
+                resp.context_menu(|ui| {
+                    if ui.button(tpl(tr(self.lang(), "btn_close_tab"), &[])).clicked() {
+                        close = Some(i);
+                        ui.close();
+                    }
+                });
             }
             if let Some(i) = activate {
                 self.active_tab = i;

@@ -64,6 +64,7 @@ const T: &[(&str, &str, &str, &str)] = &[
     ("f_proxy", "SOCKS5 proxy (optional)", "SOCKS5 代理（可选）", "SOCKS5 代理（可選）"),
     ("btn_save", "Save", "保存", "儲存"),
     ("btn_cancel", "Cancel", "取消", "取消"),
+    ("btn_close_tab", "Close", "关闭", "關閉"),
     ("err_name_required", "Name is required", "名称不能为空", "名稱不能為空"),
     ("err_host_required", "Host is required", "主机不能为空", "主機不能為空"),
     // ---- terminal / session ----
