@@ -8,6 +8,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod fonts;
 mod gconfig;
 mod i18n;
 mod session;
@@ -41,25 +42,30 @@ fn main() -> eframe::Result {
         .expect("failed to start tokio runtime");
 
     let window_size = [gcfg.window.width as f32, gcfg.window.height as f32];
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size(window_size)
+        .with_min_inner_size([640.0, 400.0])
+        .with_title(window_title())
+        .with_icon(load_icon());
+    if gcfg.window.saved {
+        // Restore last-session geometry
+        viewport = viewport
+            .with_position([gcfg.window.x as f32, gcfg.window.y as f32])
+            .with_maximized(gcfg.window.maximized);
+    }
 
-    let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size(window_size)
-            .with_min_inner_size([640.0, 400.0])
-            .with_title(window_title())
-            .with_icon(load_icon()),
-        ..Default::default()
-    };
+    let options = eframe::NativeOptions { viewport, ..Default::default() };
 
     // NB: `rt` must stay alive in this scope for the whole app lifetime — a Runtime
     // dropped (e.g. moved into the creator closure, which eframe discards after the
     // first call) silently shuts down all background session tasks.
     let rt_handle = rt.handle().clone();
+    let mono_choice = gcfg.font_family.clone();
     eframe::run_native(
         "xxsshg",
         options,
         Box::new(move |cc| {
-            install_fonts(cc);
+            install_fonts(cc, &mono_choice);
             Ok(Box::new(XxsshgApp::new(
                 rt_handle.clone(),
                 servers_path,
@@ -94,74 +100,7 @@ fn load_icon() -> egui::IconData {
     }
 }
 
-/// Register a CJK fallback font from the system so Chinese/Japanese/Korean text
-/// renders without bloating the binary with an embedded font.
-fn install_fonts(cc: &eframe::CreationContext<'_>) {
-    const CANDIDATES: &[&str] = &[
-        // Windows
-        "C:/Windows/Fonts/msyh.ttc",
-        "C:/Windows/Fonts/simhei.ttf",
-        "C:/Windows/Fonts/Deng.ttf",
-        // macOS
-        "/System/Library/Fonts/PingFang.ttc",
-        "/System/Library/Fonts/STHeiti Light.ttc",
-        // Linux
-        "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-        "/usr/share/fonts/truetype/wqy/wqy-microhei.ttc",
-        "/usr/share/fonts/wqy-microhei/wqy-microhei.ttc",
-    ];
-
-    let mut defs = egui::FontDefinitions::default();
-
-    // Prefer the platform monospace font for the terminal: designed for screen
-    // use, much crisper at small sizes than egui's built-in proportional-derived
-    // monospace (which is rendered without hinting).
-    const MONO: &[(&str, &str)] = &[
-        ("C:/Windows/Fonts/consola.ttf", "consolas"),
-        ("/System/Library/Fonts/Menlo.ttc", "menlo"),
-        ("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", "dejavu_mono"),
-        ("/usr/share/fonts/misc/terminus.ttf", "terminus"),
-    ];
-    for (path, name) in MONO {
-        if let Ok(bytes) = std::fs::read(path) {
-            defs.font_data.insert(
-                (*name).into(),
-                std::sync::Arc::new(egui::epaint::text::FontData {
-                    font: bytes.into(),
-                    index: 0,
-                    tweak: Default::default(),
-                }),
-            );
-            if let Some(family) = defs.families.get_mut(&egui::FontFamily::Monospace) {
-                family.insert(0, (*name).into());
-            }
-            break;
-        }
-    }
-
-    // CJK fallback (after the primary fonts)
-    for path in CANDIDATES {
-        if let Ok(bytes) = std::fs::read(path) {
-            // ttc collections: `index` selects the face (0 is right for
-            // msyh / wqy / noto).
-            defs.font_data.insert(
-                "cjk_fallback".into(),
-                std::sync::Arc::new(egui::epaint::text::FontData {
-                    font: bytes.into(),
-                    index: 0,
-                    tweak: Default::default(),
-                }),
-            );
-            defs.families
-                .entry(egui::FontFamily::Proportional)
-                .or_default()
-                .push("cjk_fallback".into());
-            defs.families
-                .entry(egui::FontFamily::Monospace)
-                .or_default()
-                .push("cjk_fallback".into());
-            break;
-        }
-    }
-    cc.egui_ctx.set_fonts(defs);
+/// Install fonts (see fonts::apply_fonts)
+fn install_fonts(cc: &eframe::CreationContext<'_>, mono_choice: &str) {
+    fonts::apply_fonts(&cc.egui_ctx, mono_choice);
 }

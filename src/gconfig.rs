@@ -29,11 +29,19 @@ pub struct WindowState {
     pub height: u32,
     #[serde(default)]
     pub maximized: bool,
+    /// Restored-on-start position (outer rect, monitor space); valid when `saved`
+    #[serde(default)]
+    pub x: i32,
+    #[serde(default)]
+    pub y: i32,
+    /// Whether a previous session recorded its geometry
+    #[serde(default)]
+    pub saved: bool,
 }
 
 impl Default for WindowState {
     fn default() -> Self {
-        Self { width: 1100, height: 720, maximized: false }
+        Self { width: 1100, height: 720, maximized: false, x: 0, y: 0, saved: false }
     }
 }
 

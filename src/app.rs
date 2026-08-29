@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use tokio::sync::{mpsc, oneshot};
 
+use crate::fonts;
 use crate::gconfig::{BellMode, GuiConfig, Theme};
 use crate::i18n::{tpl, tr, Language};
 use crate::session::{self, ConnectError, ConnectOpts, ConnectRequest, SessionEvent, SessionHandle};
@@ -160,6 +161,8 @@ enum Question {
 
 pub struct XxsshgApp {
     rt: tokio::runtime::Handle,
+    /// Terminal monospace fonts available on this machine (labels)
+    mono_fonts: Vec<&'static str>,
     pub servers_path: PathBuf,
     pub settings_path: PathBuf,
     pub gui_path: PathBuf,
@@ -194,6 +197,7 @@ impl XxsshgApp {
     ) -> Self {
         Self {
             rt,
+            mono_fonts: fonts::available_monos(),
             servers_path,
             settings_path,
             gui_path,
@@ -545,6 +549,7 @@ impl XxsshgApp {
     // -- dialogs -------------------------------------------------------------
 
     fn dialogs(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
         let dlg_lang = self.lang();
         // Server form
         if self.form.is_some() {
@@ -842,6 +847,28 @@ impl XxsshgApp {
                             ui.label(tr(lang, "s_invert_scroll"));
                             ui.checkbox(&mut self.gcfg.invert_scrolling, "");
                             ui.end_row();
+                            ui.label(tr(lang, "s_font"));
+                            egui::ComboBox::from_id_salt("font_cb")
+                                .selected_text(if self.gcfg.font_family.is_empty() {
+                                    egui::RichText::new(tpl(tr(lang, "s_font_default"), &[])).weak()
+                                } else {
+                                    egui::RichText::new(self.gcfg.font_family.clone())
+                                })
+                                .show_ui(ui, |ui| {
+                                    ui.selectable_value(
+                                        &mut self.gcfg.font_family,
+                                        String::new(),
+                                        tpl(tr(lang, "s_font_default"), &[]),
+                                    );
+                                    for label in self.mono_fonts.clone() {
+                                        ui.selectable_value(
+                                            &mut self.gcfg.font_family,
+                                            label.to_string(),
+                                            label,
+                                        );
+                                    }
+                                });
+                            ui.end_row();
                         });
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
@@ -852,6 +879,7 @@ impl XxsshgApp {
                             if let Err(e) = save_settings(&self.settings_path, &self.settings) {
                                 self.toast(format!("save failed: {e}"));
                             }
+                            fonts::apply_fonts(&ctx, &self.gcfg.font_family);
                             self.toast(tr(lang, "s_saved").into());
                             close = true;
                         }
@@ -918,6 +946,7 @@ impl XxsshgApp {
                 });
             match answer {
                 Some(true) => {
+                    self.capture_window_state(&ctx);
                     self.persist_gui();
                     std::process::exit(0);
                 }
@@ -944,6 +973,19 @@ impl XxsshgApp {
 
     pub fn persist_gui(&self) {
         let _ = crate::gconfig::save(&self.gui_path, &self.gcfg);
+    }
+
+    /// Record current window geometry into gcfg (called on exit paths)
+    fn capture_window_state(&mut self, ctx: &egui::Context) {
+        let vi = ctx.input(|i| i.viewport().clone());
+        if let Some(rect) = vi.outer_rect {
+            self.gcfg.window.width = rect.width().round().max(1.0) as u32;
+            self.gcfg.window.height = rect.height().round().max(1.0) as u32;
+            self.gcfg.window.x = rect.min.x.round() as i32;
+            self.gcfg.window.y = rect.min.y.round() as i32;
+            self.gcfg.window.saved = true;
+        }
+        self.gcfg.window.maximized = vi.maximized.unwrap_or(false);
     }
 
 }
@@ -983,6 +1025,7 @@ impl eframe::App for XxsshgApp {
         let closing = ctx.input(|i| i.viewport().close_requested());
         if closing {
             if !self.gcfg.confirm_on_quit || !self.has_open_session() {
+                self.capture_window_state(&ctx);
                 self.persist_gui();
                 // No confirmation needed: let the window close (do not cancel)
             } else {
