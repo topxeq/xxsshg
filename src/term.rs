@@ -253,15 +253,17 @@ impl Terminal {
             egui::Sense::click() | egui::Sense::drag(),
         );
         let painter = ui.painter_at(rect);
-        let origin = rect.min;
 
         // Cell metrics from the monospace font
         let font_id = egui::FontId::monospace(font_size);
-        let cell_w = ui
-            .ctx()
-            .fonts_mut(|f| f.glyph_width(&font_id, 'M'))
-            .max(1.0);
-        let cell_h = font_size * 1.25;
+        // Snap cell metrics and the grid origin to whole physical pixels:
+        // fractional glyph positions (measured widths are fractional, vertical
+        // centering adds 0.5px) make stems blurry / ghosted on LCDs.
+        let ppp = ui.ctx().pixels_per_point();
+        let q = |v: f32| (v * ppp).round() / ppp;
+        let cell_w = q(ui.ctx().fonts_mut(|f| f.glyph_width(&font_id, 'M')).max(1.0)).max(1.0);
+        let cell_h = q(font_size * 1.25).max(1.0);
+        let origin = egui::pos2(q(rect.min.x), q(rect.min.y));
         self.cell_w = cell_w;
         self.cell_h = cell_h;
 
@@ -306,7 +308,7 @@ impl Terminal {
                             );
                         }
                         painter.text(
-                            egui::pos2(x, y + cell_h * 0.5),
+                            egui::pos2(x, q(y + cell_h * 0.5)),
                             egui::Align2::LEFT_CENTER,
                             run.as_str(),
                             bold_id.clone(),
@@ -373,7 +375,7 @@ impl Terminal {
                         );
                     }
                     painter.text(
-                        egui::pos2(x, y + cell_h * 0.5),
+                        egui::pos2(x, q(y + cell_h * 0.5)),
                         egui::Align2::LEFT_CENTER,
                         ch.to_string(),
                         bold_id.clone(),
@@ -428,7 +430,7 @@ impl Terminal {
                     egui::Color32::from_rgba_unmultiplied(70, 110, 190, 120),
                 );
                 painter.text(
-                    egui::pos2(px, py + cell_h * 0.5),
+                    egui::pos2(px, q(py + cell_h * 0.5)),
                     egui::Align2::LEFT_CENTER,
                     &self.preedit,
                     bold_id.clone(),
