@@ -845,7 +845,7 @@ mod e2e_tests {
     /// XXSSHG_E2E=1 to keep `cargo test` offline-friendly).
     #[test]
     fn connect_and_open_shell_e2e() {
-        if std::env::var("XXSSHG_E2E").unwrap_or_default() != "1" {
+        if !matches!(std::env::var("XXSSHG_E2E").unwrap_or_default().as_str(), "1" | "2") {
             return;
         }
         let rt = tokio::runtime::Builder::new_multi_thread()
@@ -884,6 +884,43 @@ mod e2e_tests {
         });
         match res {
             Ok(Ok(Ok(mut handle))) => {
+                // XXSSHG_E2E=2: interactive typing simulation (ascii, CJK commit,
+                // more ascii, then a PTY resize = font-size change), capturing the
+                // raw echo stream for offline cursor replay.
+                if std::env::var("XXSSHG_E2E").ok().as_deref() == Some("2") {
+                    use std::time::Duration;
+                    rt.block_on(async {
+                        let _ = handle.input_tx.send(b"abasdfhakfd ".to_vec());
+                        tokio::time::sleep(Duration::from_millis(400)).await;
+                        let _ = handle.input_tx.send("\u{662f}\u{7684}\u{9644}\u{8fd1}\u{53ef}\u{597d}\u{770b}".as_bytes().to_vec());
+                        tokio::time::sleep(Duration::from_millis(400)).await;
+                        let _ = handle.input_tx.send(b" hjk and some more text to push this prompt line well beyond the seventy column width for wrap testing".to_vec());
+                        tokio::time::sleep(Duration::from_millis(600)).await;
+                        let _ = handle.resize_tx.send((70u16, 20u16));
+                        tokio::time::sleep(Duration::from_millis(800)).await;
+                        let _ = handle.close_tx.send(());
+                        let mut all: Vec<u8> = Vec::new();
+                        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+                        while tokio::time::Instant::now() < deadline {
+                            tokio::select! {
+                                out = handle.output_rx.recv() => {
+                                    match out {
+                                        Some(bytes) => all.extend_from_slice(&bytes),
+                                        None => break,
+                                    }
+                                }
+                                ev = handle.event_rx.recv() => {
+                                    if matches!(ev, Some(SessionEvent::Closed { .. })) { break; }
+                                }
+                            }
+                        }
+                        std::fs::write("pty-typing.bin", &all).unwrap();
+                        println!("captured {} bytes -> pty-typing.bin", all.len());
+                    });
+                    ans.join().ok();
+                    return;
+                }
+
                 let _ = handle.input_tx.send(b"echo xxsshg_e2e_ok && exit\n".to_vec());
                 let mut got_out = false;
                 let mut closed = false;

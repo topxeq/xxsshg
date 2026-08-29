@@ -881,6 +881,18 @@ mod tests {
         let text = dump_grid(&t);
         println!("=== GRID DUMP ===
 {text}=== END ===");
+        {
+            let cp = t.term.grid().cursor.point;
+            let grid = t.term.grid();
+            let mut last = String::new();
+            for row in 0..t.rows as i32 {
+                let grid_row = &grid[Line(row - t.display_offset() as i32)];
+                let mut line = String::new();
+                for col in 0..t.cols as usize { line.push(grid_row[Column(col)].c); }
+                if line.trim().len() > 4 { last = line; }
+            }
+            println!("CURSOR line={} col={} | last: {:?}", cp.line.0, cp.column.0, last.trim_end());
+        }
         assert!(text.contains("root@ecs-6b17-xhw01:~#"), "PROMPT MISSING from replayed stream");
     }
 }
