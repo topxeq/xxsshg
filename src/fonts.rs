@@ -35,18 +35,18 @@ const CJK_CANDIDATES: &[&str] = &[
 /// of the Latin mono font vs the CJK fallback, so it scales with font size.
 pub static CJK_BASELINE_SHIFT_EM: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
 
-#[doc(hidden)]
-pub fn apply_fonts_dummy_for_test() {
-    if let Some((_, mono)) = MONO_CANDIDATES
+#[cfg(test)]
+pub(crate) fn apply_fonts_for_test() {
+    let mono = MONO_CANDIDATES
         .iter()
         .find(|(_, p)| std::path::Path::new(p).exists())
+        .map(|(_, p)| *p);
+    if let Some(cjk) = CJK_CANDIDATES
+        .iter()
+        .find(|p| std::path::Path::new(p).exists())
     {
-        if let Some(cjk) = CJK_CANDIDATES
-            .iter()
-            .find(|p| std::path::Path::new(p).exists())
-        {
-            compute_baseline_shift(cjk);
-        }
+        let _ = mono;
+        compute_baseline_shift(cjk);
     }
 }
 
@@ -151,7 +151,7 @@ fn compute_baseline_shift(cjk_path: &str) {
 mod shift_tests {
     #[test]
     fn baseline_shift_value() {
-        crate::fonts::apply_fonts_dummy_for_test();
+        crate::fonts::apply_fonts_for_test();
         let v = crate::fonts::CJK_BASELINE_SHIFT_EM.get();
         println!("CJK_BASELINE_SHIFT_EM = {:?}", v);
         assert!(v.is_some());
