@@ -74,9 +74,23 @@ pub fn apply_fonts(ctx: &egui::Context, mono_choice: &str) {
     // CJK fallback (after the primary fonts; ttc index 0 is right for msyh/wqy/noto)
     for path in CJK_CANDIDATES {
         if let Ok(bytes) = std::fs::read(path) {
+            // The CJK font's glyphs sit higher in their em box than the Latin
+            // terminal font; nudge them down so mixed lines align. Tunable via
+            // XXSSHG_CJK_SHIFT (fraction of font size, default 0.12).
+            let shift: f32 = std::env::var("XXSSHG_CJK_SHIFT")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0.12);
             defs.font_data.insert(
                 "cjk_fallback".into(),
-                Arc::new(FontData { font: bytes.into(), index: 0, tweak: Default::default() }),
+                Arc::new(FontData {
+                    font: bytes.into(),
+                    index: 0,
+                    tweak: egui::epaint::text::FontTweak {
+                        y_offset_factor: shift,
+                        ..Default::default()
+                    },
+                }),
             );
             defs.families
                 .entry(egui::FontFamily::Proportional)
