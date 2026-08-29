@@ -111,9 +111,37 @@ fn install_fonts(cc: &eframe::CreationContext<'_>) {
         "/usr/share/fonts/wqy-microhei/wqy-microhei.ttc",
     ];
 
+    let mut defs = egui::FontDefinitions::default();
+
+    // Prefer the platform monospace font for the terminal: designed for screen
+    // use, much crisper at small sizes than egui's built-in proportional-derived
+    // monospace (which is rendered without hinting).
+    const MONO: &[(&str, &str)] = &[
+        ("C:/Windows/Fonts/consola.ttf", "consolas"),
+        ("/System/Library/Fonts/Menlo.ttc", "menlo"),
+        ("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf", "dejavu_mono"),
+        ("/usr/share/fonts/misc/terminus.ttf", "terminus"),
+    ];
+    for (path, name) in MONO {
+        if let Ok(bytes) = std::fs::read(path) {
+            defs.font_data.insert(
+                (*name).into(),
+                std::sync::Arc::new(egui::epaint::text::FontData {
+                    font: bytes.into(),
+                    index: 0,
+                    tweak: Default::default(),
+                }),
+            );
+            if let Some(family) = defs.families.get_mut(&egui::FontFamily::Monospace) {
+                family.insert(0, (*name).into());
+            }
+            break;
+        }
+    }
+
+    // CJK fallback (after the primary fonts)
     for path in CANDIDATES {
         if let Ok(bytes) = std::fs::read(path) {
-            let mut defs = egui::FontDefinitions::default();
             // ttc collections: `index` selects the face (0 is right for
             // msyh / wqy / noto).
             defs.font_data.insert(
@@ -132,8 +160,8 @@ fn install_fonts(cc: &eframe::CreationContext<'_>) {
                 .entry(egui::FontFamily::Monospace)
                 .or_default()
                 .push("cjk_fallback".into());
-            cc.egui_ctx.set_fonts(defs);
             break;
         }
     }
+    cc.egui_ctx.set_fonts(defs);
 }

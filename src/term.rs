@@ -711,9 +711,9 @@ impl Terminal {
 fn default_palette(index: usize) -> Rgb {
     let c = |r: u8, g: u8, b: u8| Rgb { r, g, b };
     match index {
-        256 => c(0xd4, 0xd4, 0xd4), // foreground
+        256 => c(0xe8, 0xe8, 0xe8), // foreground
         257 => c(0x1e, 0x1e, 0x1e), // background
-        258 => c(0xd4, 0xd4, 0xd4), // cursor
+        258 => c(0xe8, 0xe8, 0xe8), // cursor
         0 => c(0x00, 0x00, 0x00),
         1 => c(0xcd, 0x31, 0x31),
         2 => c(0x00, 0xcd, 0x00),
@@ -745,7 +745,7 @@ fn default_palette(index: usize) -> Rgb {
             let v: u8 = (8 + (i - 232) * 10) as u8;
             c(v, v, v)
         }
-        _ => c(0xd4, 0xd4, 0xd4),
+        _ => c(0xe8, 0xe8, 0xe8),
     }
 }
 
