@@ -75,6 +75,10 @@ pub struct GuiConfig {
     pub show_sidebar: bool,
     #[serde(default)]
     pub bell: BellMode,
+    /// Invert mouse wheel direction in the terminal (default: traditional,
+    /// wheel up scrolls back into history)
+    #[serde(default)]
+    pub invert_scrolling: bool,
 }
 
 fn default_version() -> u32 {
@@ -103,6 +107,7 @@ impl Default for GuiConfig {
             confirm_on_quit: true,
             show_sidebar: true,
             bell: BellMode::default(),
+            invert_scrolling: false,
         }
     }
 }

@@ -243,6 +243,7 @@ impl Terminal {
         ui: &mut egui::Ui,
         font_size: f32,
         copy_on_select: bool,
+        invert_scrolling: bool,
     ) -> bool {
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(
@@ -469,8 +470,24 @@ impl Terminal {
         }
 
         // ---- input handling -------------------------------------------------
+        // Right-click: copy when there is a selection, paste when there is none.
+        // Plain left-click always clears an existing selection.
+        if response.secondary_clicked() {
+            let mode = self.term.mode().clone();
+            if let Some(text) = self.selection_text() {
+                ui.ctx().copy_text(text);
+                self.selection = None;
+            } else if let Ok(mut cb) = arboard::Clipboard::new() {
+                if let Ok(text) = cb.get_text() {
+                    if !text.is_empty() {
+                        self.paste(&text, &mode);
+                    }
+                }
+            }
+        }
         if response.clicked() {
             response.request_focus();
+            self.selection = None;
         }
 
         // Mouse selection

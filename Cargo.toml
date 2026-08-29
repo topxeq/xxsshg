@@ -22,6 +22,7 @@ log = "0.4"
 env_logger = "0.11"
 image = { version = "0.25.10", default-features = false, features = ["png"] }
 egui = "0.36"
+arboard = "3.6.1"
 
 [profile.release]
 opt-level = 2

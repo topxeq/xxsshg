@@ -517,7 +517,7 @@ impl XxsshgApp {
                     });
                     return;
                 }
-                let resized = term.paint(ui, self.gcfg.font_size, self.gcfg.copy_on_select);
+                let resized = term.paint(ui, self.gcfg.font_size, self.gcfg.copy_on_select, self.gcfg.invert_scrolling);
                 if resized || !*resize_sent {
                     let (cols, rows) = term.grid_size();
                     let _ = handle.resize_tx.send((cols, rows));
@@ -829,6 +829,9 @@ impl XxsshgApp {
                                 ui.selectable_value(&mut self.gcfg.bell, BellMode::Flash, tr(lang, "bell_flash"));
                                 ui.selectable_value(&mut self.gcfg.bell, BellMode::Sound, tr(lang, "bell_sound"));
                             });
+                            ui.end_row();
+                            ui.label(tr(lang, "s_invert_scroll"));
+                            ui.checkbox(&mut self.gcfg.invert_scrolling, "");
                             ui.end_row();
                         });
                     ui.add_space(6.0);

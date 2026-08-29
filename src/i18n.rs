@@ -99,6 +99,7 @@ const T: &[(&str, &str, &str, &str)] = &[
     ("s_copy_on_select", "Copy on select", "选中即复制", "選取即複製"),
     ("s_confirm_quit", "Confirm on quit", "退出时确认", "結束時確認"),
     ("s_bell", "Terminal bell", "终端铃声", "終端鈴聲"),
+    ("s_invert_scroll", "Invert mouse wheel", "反转滚轮方向", "反轉滾輪方向"),
     ("bell_mute", "Mute", "静音", "靜音"),
     ("bell_flash", "Flash", "闪烁", "閃爍"),
     ("bell_sound", "Sound", "响铃", "響鈴"),
