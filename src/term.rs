@@ -14,9 +14,15 @@ use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
 use tokio::sync::mpsc;
 
-/// Diagnostic cursor/IO log (auto-enabled: ~/.xxssh/cursor-debug.log).
+/// Diagnostic cursor/IO log. Off unless XXSSHG_DEBUG_CURSOR=1
+/// (log: ~/.xxssh/cursor-debug.log).
 pub fn diag_log(msg: &str) {
     use std::io::Write;
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    if !*ENABLED.get_or_init(|| std::env::var("XXSSHG_DEBUG_CURSOR").ok().as_deref() == Some("1")) {
+        return;
+    }
     if let Some(home) = dirs::home_dir() {
         let path = home.join(".xxssh").join("cursor-debug.log");
         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
