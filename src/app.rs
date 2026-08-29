@@ -344,10 +344,14 @@ impl XxsshgApp {
         ui.add_space(4.0);
         ui.separator();
 
-        // Server list fills the remaining space
-        let btn_h = 64.0; // reserved height for the button area below
+        // Server list fills the remaining space.
+        // NOTE: the list height is computed BEFORE entering the ScrollArea — using
+        // available_height inside the closure would feed content size back into the
+        // layout and grow every repaint.
+        let btn_h = 78.0; // reserved height for the button area below
+        let list_height = (ui.available_height() - btn_h).max(60.0);
         egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.set_min_height(ui.available_height() - btn_h);
+            ui.set_min_height(list_height);
             for i in 0..self.servers.len() {
                 let name = self.servers[i].name.clone();
                 let host = format!(
@@ -879,7 +883,8 @@ impl eframe::App for XxsshgApp {
         }
 
         egui::Panel::left(egui::Id::new("servers"))
-            .default_size(220.0)
+            .exact_size(240.0)
+            .resizable(false)
             .show(ui, |ui| {
                 self.sidebar(ui);
             });
