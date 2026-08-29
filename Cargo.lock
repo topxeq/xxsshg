@@ -4471,6 +4471,7 @@ dependencies = [
  "russh",
  "serde",
  "serde_json",
+ "skrifa",
  "tokio",
  "tokio-socks",
  "winresource",

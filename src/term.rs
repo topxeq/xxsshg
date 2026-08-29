@@ -364,8 +364,19 @@ impl Terminal {
                         bg,
                     );
                 }
+                // CJK glyphs use the fallback font whose baseline differs from
+                // the Latin mono font; apply the precomputed em-fraction shift
+                // (see fonts::compute_baseline_shift) so baselines coincide.
+                let y_draw = if wide {
+                    match crate::fonts::CJK_BASELINE_SHIFT_EM.get() {
+                        Some(shift_em) => y + shift_em * font_size,
+                        None => y,
+                    }
+                } else {
+                    y
+                };
                 painter.text(
-                    egui::pos2(x, q(y + cell_h * 0.5)),
+                    egui::pos2(x, q(y_draw + cell_h * 0.5)),
                     egui::Align2::LEFT_CENTER,
                     ch.to_string(),
                     mono_id.clone(),

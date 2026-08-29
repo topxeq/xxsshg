@@ -30,6 +30,26 @@ const CJK_CANDIDATES: &[&str] = &[
     "/usr/share/fonts/wqy-microhei/wqy-microhei.ttc",
 ];
 
+/// Vertical baseline correction for CJK glyphs, as a fraction of font size.
+/// Computed in [`apply_fonts`] from the real font metrics (hhea ascent/descent)
+/// of the Latin mono font vs the CJK fallback, so it scales with font size.
+pub static CJK_BASELINE_SHIFT_EM: std::sync::OnceLock<f32> = std::sync::OnceLock::new();
+
+#[doc(hidden)]
+pub fn apply_fonts_dummy_for_test() {
+    if let Some((_, mono)) = MONO_CANDIDATES
+        .iter()
+        .find(|(_, p)| std::path::Path::new(p).exists())
+    {
+        if let Some(cjk) = CJK_CANDIDATES
+            .iter()
+            .find(|p| std::path::Path::new(p).exists())
+        {
+            compute_baseline_shift(cjk);
+        }
+    }
+}
+
 /// Labels of the candidates that exist on this machine
 pub fn available_monos() -> Vec<&'static str> {
     MONO_CANDIDATES
@@ -77,20 +97,9 @@ pub fn apply_fonts(ctx: &egui::Context, mono_choice: &str) {
             // The CJK font's glyphs sit higher in their em box than the Latin
             // terminal font; nudge them down so mixed lines align. Tunable via
             // XXSSHG_CJK_SHIFT (fraction of font size, default 0.12).
-            let shift: f32 = std::env::var("XXSSHG_CJK_SHIFT")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(0.12);
             defs.font_data.insert(
                 "cjk_fallback".into(),
-                Arc::new(FontData {
-                    font: bytes.into(),
-                    index: 0,
-                    tweak: egui::epaint::text::FontTweak {
-                        y_offset_factor: shift,
-                        ..Default::default()
-                    },
-                }),
+                Arc::new(FontData { font: bytes.into(), index: 0, tweak: Default::default() }),
             );
             defs.families
                 .entry(egui::FontFamily::Proportional)
@@ -100,8 +109,53 @@ pub fn apply_fonts(ctx: &egui::Context, mono_choice: &str) {
                 .entry(egui::FontFamily::Monospace)
                 .or_default()
                 .push("cjk_fallback".into());
+            compute_baseline_shift(path);
             break;
         }
     }
     ctx.set_fonts(defs);
+}
+
+/// epaint positions each glyph on the baseline of its OWN font metrics
+/// (row_height = ascent - descent + line_gap). The CJK fallback font has
+/// different metrics than the Latin mono font, so per-cell centered drawing
+/// puts CJK glyphs at the wrong height. Compute the exact em-fraction shift
+/// that aligns the CJK baseline with the Latin baseline.
+fn compute_baseline_shift(cjk_path: &str) {
+    use skrifa::instance::Size as SkrifaSize;
+    let Some((_, latin_path)) = resolve_mono("") else { return };
+    let Ok(cjk_bytes) = std::fs::read(cjk_path) else { return };
+    let (Ok(cjk_font), Ok(latin_bytes)) = (
+        skrifa::FontRef::from_index(&cjk_bytes, 0),
+        std::fs::read(latin_path),
+    ) else {
+        return;
+    };
+    let Ok(latin_font) = skrifa::FontRef::from_index(&latin_bytes, 0) else { return };
+    let em = |f: &skrifa::FontRef| -> (f32, f32, f32) {
+        // epaint uses skrifa Metrics (ascent/descent/leading are em fractions
+        // when constructed with a nominal size); a size of 1 em is enough here.
+        let m = skrifa::metrics::Metrics::new(f, SkrifaSize::new(1.0), skrifa::instance::LocationRef::default());
+        (m.ascent, m.descent, m.leading)
+    };
+    let (asc_l, desc_l, gap_l) = em(&latin_font);
+    let (asc_c, desc_c, gap_c) = em(&cjk_font);
+    let row_l = asc_l - desc_l + gap_l;
+    let row_c = asc_c - desc_c + gap_c;
+    // Align baselines (paint: baseline = center - row_height/2 + ascent)
+    let shift_em = (row_c - row_l) / 2.0 + (asc_l - asc_c);
+    let _ = CJK_BASELINE_SHIFT_EM.set(shift_em);
+}
+
+#[cfg(test)]
+mod shift_tests {
+    #[test]
+    fn baseline_shift_value() {
+        crate::fonts::apply_fonts_dummy_for_test();
+        let v = crate::fonts::CJK_BASELINE_SHIFT_EM.get();
+        println!("CJK_BASELINE_SHIFT_EM = {:?}", v);
+        assert!(v.is_some());
+        let v = v.unwrap();
+        assert!(v.abs() < 1.0, "shift out of sane range: {v}");
+    }
 }
