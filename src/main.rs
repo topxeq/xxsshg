@@ -42,7 +42,7 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size(window_size)
             .with_min_inner_size([640.0, 400.0])
-            .with_title("xxsshg")
+            .with_title(window_title())
             .with_icon(load_icon()),
         ..Default::default()
     };
@@ -66,6 +66,15 @@ fn main() -> eframe::Result {
                 gcfg,
             )))
         }),
+    )
+}
+
+/// Window title with version + build number, e.g. "xxsshg v0.1.0 (7dd959a)"
+fn window_title() -> String {
+    format!(
+        "xxsshg v{} ({})",
+        env!("CARGO_PKG_VERSION"),
+        env!("XXSSHG_BUILD_HASH")
     )
 }
 
