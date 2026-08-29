@@ -339,17 +339,23 @@ impl XxsshgApp {
     // -- ui ------------------------------------------------------------------
 
     fn sidebar(&mut self, ui: &mut egui::Ui) {
-        ui.add_space(4.0);
+        ui.add_space(6.0);
         ui.heading(tpl(tr(self.lang(), "list_title"), &[]));
         ui.add_space(4.0);
+        ui.separator();
+
+        // Server list fills the remaining space
+        let btn_h = 64.0; // reserved height for the button area below
         egui::ScrollArea::vertical().show(ui, |ui| {
+            ui.set_min_height(ui.available_height() - btn_h);
             for i in 0..self.servers.len() {
                 let name = self.servers[i].name.clone();
                 let host = format!(
                     "{}@{}:{}",
                     self.servers[i].username, self.servers[i].host, self.servers[i].port
                 );
-                let resp = ui.selectable_label(i == self.selected_server, format!("{name}\n  {host}"));
+                let resp = ui.selectable_label(i == self.selected_server, format!("{name}
+  {host}"));
                 if resp.clicked() {
                     self.selected_server = i;
                     if resp.double_clicked() {
@@ -358,40 +364,51 @@ impl XxsshgApp {
                 }
             }
         });
+
         ui.separator();
-        ui.horizontal(|ui| {
-            let enabled = !self.servers.is_empty() && self.selected_server < self.servers.len();
-            ui.add_enabled_ui(enabled, |ui| {
-                if ui.button(tpl(tr(self.lang(), "btn_connect"), &[])).clicked() {
-                    self.connect_server(self.selected_server);
-                }
-            });
+        ui.add_space(4.0);
+
+        // Primary action: full-width Connect
+        let can_connect = !self.servers.is_empty() && self.selected_server < self.servers.len();
+        ui.add_enabled_ui(can_connect, |ui| {
+            let connect_btn = ui.add_sized(
+                [ui.available_width(), 26.0],
+                egui::Button::new(egui::RichText::new(tpl(tr(self.lang(), "btn_connect"), &[])).strong()),
+            );
+            if connect_btn.clicked() {
+                self.connect_server(self.selected_server);
+            }
         });
+        ui.add_space(4.0);
+
+        // Row: New / Edit / Delete
         ui.horizontal(|ui| {
-            if ui.button(tpl(tr(self.lang(), "btn_new"), &[])).clicked() {
+            let w = [(ui.available_width() - 12.0) / 3.0, 22.0];
+            if ui.add_sized(w, egui::Button::new(tpl(tr(self.lang(), "btn_new"), &[]))).clicked() {
                 self.form = Some(ServerForm::new());
                 self.form_open = true;
             }
             let can_edit = !self.servers.is_empty() && self.selected_server < self.servers.len();
             ui.add_enabled_ui(can_edit, |ui| {
-                if ui.button(tpl(tr(self.lang(), "btn_edit"), &[])).clicked() {
-                    let s = self.servers[self.selected_server].clone();
-                    self.form = Some(ServerForm::from_server(self.selected_server, &s));
+                if ui.add_sized(w, egui::Button::new(tpl(tr(self.lang(), "btn_edit"), &[]))).clicked() {
+                    let srv = self.servers[self.selected_server].clone();
+                    self.form = Some(ServerForm::from_server(self.selected_server, &srv));
                     self.form_open = true;
                 }
-                if ui.button(tpl(tr(self.lang(), "btn_delete"), &[])).clicked() {
+                if ui.add_sized(w, egui::Button::new(tpl(tr(self.lang(), "btn_delete"), &[]))).clicked() {
                     self.delete_confirm = Some(self.selected_server);
                 }
             });
         });
-        ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-            ui.separator();
-            ui.horizontal(|ui| {
-                if ui.button(tpl(tr(self.lang(), "settings_title"), &[])).clicked() {
-                    self.settings_open = true;
-                }
-            });
+        ui.add_space(4.0);
+
+        // Row: Settings
+        ui.horizontal(|ui| {
+            if ui.button(format!("⚙ {}", tpl(tr(self.lang(), "settings_title"), &[]))).clicked() {
+                self.settings_open = true;
+            }
         });
+        ui.add_space(4.0);
     }
 
     fn tabs_bar(&mut self, ui: &mut egui::Ui) {
