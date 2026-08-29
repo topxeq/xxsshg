@@ -348,6 +348,10 @@ async fn connect_and_open(
                 r = input_rx.recv() => {
                     match r {
                         Some(data) => {
+                            {
+                                let head: String = data.iter().take(32).map(|&b| format!("{:02x} ", b)).collect();
+                                crate::term::diag_log(&format!("pty-in: {} bytes: {}", data.len(), head));
+                            }
                             if channel.data(&data[..]).await.is_err() {
                                 closed = true;
                                 reason = "write failed".into();

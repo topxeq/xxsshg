@@ -14,6 +14,17 @@ use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
 use tokio::sync::mpsc;
 
+/// Diagnostic cursor/IO log (auto-enabled: ~/.xxssh/cursor-debug.log).
+pub fn diag_log(msg: &str) {
+    use std::io::Write;
+    if let Some(home) = dirs::home_dir() {
+        let path = home.join(".xxssh").join("cursor-debug.log");
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+            let _ = writeln!(f, "{msg}");
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Event proxy: model events -> GUI / PTY
 // ---------------------------------------------------------------------------
@@ -166,7 +177,15 @@ impl Terminal {
 
     /// Feed raw PTY output through the VT processor
     pub fn feed(&mut self, bytes: &[u8]) {
+        let head: String = bytes.iter().take(24).map(|&b| format!("{:02x} ", b)).collect();
+        diag_log(&format!(
+            "feed: {} bytes head: {}",
+            bytes.len(),
+            head
+        ));
         self.parser.advance(&mut self.term, bytes);
+        let cp = self.term.grid().cursor.point;
+        diag_log(&format!("feed-done: cursor=({},{})", cp.line.0, cp.column.0));
     }
 
     /// Resize the grid; returns true if the size actually changed
@@ -462,7 +481,14 @@ impl Terminal {
         // Cursor (only on the visible screen when not scrolled into history)
         // XXSSHG_DEBUG_CURSOR=1: overlay the model's cursor cell numbers to
         // arbitrate "model vs draw" cursor-position disputes.
-        let debug_cursor = std::env::var("XXSSHG_DEBUG_CURSOR").is_ok();
+        let debug_cursor = true;
+        {
+            let cp0 = grid.cursor.point;
+            diag_log(&format!(
+                "paint: cursor=({},{}), offset={}, grid={}x{}, cell={}x{}, origin=({:.1},{:.1}), ppp={:.2}, font={:.1}",
+                cp0.line.0, cp0.column.0, offset, self.rows, self.cols, cell_w, cell_h, origin.x, origin.y, ppp, font_size
+            ));
+        }
         if debug_cursor && offset == 0 {
             let cp = grid.cursor.point;
             painter.text(
@@ -938,7 +964,26 @@ mod tests {
             t.resize(70, 20); // the font-size change
             t.feed(&bytes[pos..]);
         } else {
-            t.feed(&bytes);
+            // incremental feed with cursor trace
+            let mut pos = 0usize;
+            let mut last = (99i32, 999usize);
+            while pos < bytes.len() {
+                let end = (pos + 8).min(bytes.len());
+                t.feed(&bytes[pos..end]);
+                pos = end;
+                let cp = t.term.grid().cursor.point;
+                if (cp.line.0, cp.column.0) != last {
+                    println!(
+                        "after {:4} bytes [..{:02x} {:02x}]: cursor=({},{})",
+                        pos,
+                        bytes[pos.saturating_sub(1)],
+                        *bytes.get(pos).unwrap_or(&0),
+                        cp.line.0,
+                        cp.column.0
+                    );
+                    last = (cp.line.0, cp.column.0);
+                }
+            }
         }
         t.resize(118, 33);
         let text = dump_grid(&t);

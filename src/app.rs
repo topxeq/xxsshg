@@ -163,6 +163,9 @@ pub struct XxsshgApp {
     rt: tokio::runtime::Handle,
     /// Terminal monospace fonts available on this machine (labels)
     mono_fonts: Vec<&'static str>,
+    /// Last painted terminal grid size — new sessions start at this size so the
+    /// initial PTY matches the window (avoids a reflow that shifts the cursor)
+    last_grid: (u16, u16),
     pub servers_path: PathBuf,
     pub settings_path: PathBuf,
     pub gui_path: PathBuf,
@@ -198,6 +201,7 @@ impl XxsshgApp {
         Self {
             rt,
             mono_fonts: fonts::available_monos(),
+            last_grid: (80, 24),
             servers_path,
             settings_path,
             gui_path,
@@ -252,7 +256,8 @@ impl XxsshgApp {
         }
         let name = server.name.clone();
         log::info!("connect_server: spawning");
-        let (result_rx, request_rx) = session::spawn_connect(&self.rt, server, opts, self.lang(), 80, 24);
+        let (cols, rows) = self.last_grid;
+        let (result_rx, request_rx) = session::spawn_connect(&self.rt, server, opts, self.lang(), cols, rows);
         self.tabs.push(Tab::Connecting {
             name,
             result_rx,
@@ -358,6 +363,10 @@ impl XxsshgApp {
                 &mut self.tabs[i]
             {
                 while let Some(bytes) = handle.output_rx.try_recv().ok() {
+                    {
+                        let head: String = bytes.iter().take(32).map(|&b| format!("{:02x} ", b)).collect();
+                        crate::term::diag_log(&format!("pty-out: {} bytes: {}", bytes.len(), head));
+                    }
                     if let Ok(path) = std::env::var("XXSSHG_PTY_DUMP") {
                         use std::io::Write;
                         if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
@@ -1050,6 +1059,16 @@ impl eframe::App for XxsshgApp {
             });
         egui::CentralPanel::default_margins().show(ui, |ui| {
             self.tabs_bar(ui);
+            // Track the terminal-area grid size every frame (before any tab exists)
+            // so new sessions open with the correct PTY size immediately.
+            let cell_w = 8.0f32.max(ui.ctx().fonts_mut(|f| {
+                f.glyph_width(&egui::FontId::monospace(self.gcfg.font_size), 'M')
+            }));
+            let avail = ui.available_size();
+            self.last_grid = (
+                (((avail.x - 4.0) / cell_w).floor() as u16).max(2),
+                (((avail.y - 30.0) / (self.gcfg.font_size * 1.25)).floor() as u16).max(2),
+            );
             self.terminal_area(ui);
         });
 
