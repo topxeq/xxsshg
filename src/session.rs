@@ -148,8 +148,10 @@ pub fn spawn_connect(
 ) {
     let (result_tx, result_rx) = oneshot::channel();
     let (req_tx, req_rx) = mpsc::unbounded_channel();
+    log::info!("spawn_connect: task spawning for {host}", host = server.host);
     rt.spawn(async move {
         let res = connect_and_open(server, opts, lang, cols, rows, req_tx).await;
+        log::info!("spawn_connect: finished, ok={}", res.is_ok());
         let _ = result_tx.send(res);
     });
     (result_rx, req_rx)
@@ -192,6 +194,7 @@ async fn connect_and_open(
     });
 
     // Transport: SOCKS5 or direct (ProxyStream logic from xxssh)
+    log::debug!("connect_and_open: begin, proxy={:?}", opts.proxy);
     let stream: ProxyStream = match opts.proxy.as_deref() {
         Some(url) => {
             let p = parse_proxy_url(url).map_err(ConnectError::Proxy)?;
@@ -276,6 +279,7 @@ async fn connect_and_open(
     }
     .map_err(|e| ConnectError::Network(e.to_string()))?;
 
+    log::debug!("connect_and_open: handshake done, authenticating ({:?})", server.auth);
     // Authenticate
     let auth = match server.auth {
         AuthMethod::Password => auth_password(&mut session, &server, &requests, lang).await,
@@ -291,6 +295,7 @@ async fn connect_and_open(
         });
     }
 
+    log::debug!("connect_and_open: auth ok, opening PTY+shell");
     // Open channel + PTY + shell (PTY modes copied from xxssh)
     let mut channel = session
         .channel_open_session()
@@ -401,6 +406,7 @@ async fn connect_and_open(
             .await;
     });
 
+    log::debug!("connect_and_open: shell open, handing endpoints to UI");
     Ok(SessionHandle {
         input_tx,
         resize_tx,
@@ -754,5 +760,86 @@ mod tests {
 
         assert!(parse_proxy_url("no-port-here").is_err());
         assert!(parse_proxy_url("socks5://").is_err());
+    }
+}
+
+#[cfg(test)]
+mod e2e_tests {
+    use super::*;
+    use crate::xconfig::{AuthMethod, Server};
+
+    /// Real connection test against the xxssh test server (skipped unless
+    /// XXSSHG_E2E=1 to keep `cargo test` offline-friendly).
+    #[test]
+    fn connect_and_open_shell_e2e() {
+        if std::env::var("XXSSHG_E2E").unwrap_or_default() != "1" {
+            return;
+        }
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let server = Server {
+            name: "test".into(),
+            host: "TEST_HOST_REDACTED".into(),
+            port: 22,
+            username: "root".into(),
+            auth: AuthMethod::Password,
+            password: "REDACTED".into(),
+            key_path: String::new(),
+            key_passphrase: String::new(),
+            proxy: String::new(),
+        };
+        let (result_rx, mut req_rx) =
+            spawn_connect(rt.handle(), server, ConnectOpts::default(), Language::En, 80, 24);
+        // Answer host-key confirms in the background
+        let ans = std::thread::spawn(move || {
+            loop {
+                match req_rx.blocking_recv() {
+                    Some(ConnectRequest::HostKey { respond, .. }) => {
+                        let _ = respond.send(true);
+                    }
+                    Some(_) => {}
+                    None => break,
+                }
+            }
+        });
+        let res = rt.block_on(async move {
+            // generous overall timeout
+            tokio::time::timeout(std::time::Duration::from_secs(30), result_rx).await
+        });
+        match res {
+            Ok(Ok(Ok(mut handle))) => {
+                let _ = handle.input_tx.send(b"echo xxsshg_e2e_ok && exit\n".to_vec());
+                let mut got_out = false;
+                let mut closed = false;
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+                while std::time::Instant::now() < deadline && !(got_out && closed) {
+                    rt.block_on(async {
+                        tokio::select! {
+                            out = handle.output_rx.recv() => {
+                                if let Some(bytes) = out {
+                                    if bytes.windows(13).any(|w| w == b"xxsshg_e2e_ok") {
+                                        got_out = true;
+                                    }
+                                }
+                            }
+                            ev = handle.event_rx.recv() => {
+                                if let Some(SessionEvent::Closed { .. }) = ev {
+                                    closed = true;
+                                }
+                            }
+                        }
+                    });
+                }
+                assert!(got_out, "never saw the echo marker in PTY output");
+                ans.join().ok();
+                println!("E2E OK");
+            }
+            Ok(Ok(Err(e))) => panic!("connect failed: {e:?}"),
+            Ok(Err(_)) => panic!("connect task dropped the result (panicked)"),
+            Err(_) => panic!("timed out waiting for connect result"),
+        }
     }
 }

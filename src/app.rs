@@ -174,6 +174,7 @@ pub struct XxsshgApp {
     settings_open: bool,
     quit_confirm: bool,
     status_msg: Option<(String, std::time::Instant)>,
+    autoconnect_done: bool,
 }
 
 impl XxsshgApp {
@@ -204,6 +205,7 @@ impl XxsshgApp {
             settings_open: false,
             quit_confirm: false,
             status_msg: None,
+            autoconnect_done: false,
         }
     }
 
@@ -225,8 +227,21 @@ impl XxsshgApp {
 
     fn connect_server(&mut self, idx: usize) {
         let Some(server) = self.servers.get(idx).cloned() else { return };
-        let opts = resolve_opts(&server, &self.settings);
+        let mut opts = resolve_opts(&server, &self.settings);
+        // Headless test mode (XXSSHG_AUTOCONNECT): TOFU-trust into the standard
+        // known_hosts file so no host-key dialog blocks automated runs.
+        if std::env::var("XXSSHG_AUTOCONNECT").is_ok() {
+            opts.known_hosts_add = Some(
+                dirs::home_dir()
+                    .unwrap_or_default()
+                    .join(".xxssh")
+                    .join("known_hosts")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
         let name = server.name.clone();
+        log::info!("connect_server: spawning");
         let (result_rx, request_rx) = session::spawn_connect(&self.rt, server, opts, self.lang(), 80, 24);
         self.tabs.push(Tab::Connecting {
             name,
@@ -280,30 +295,49 @@ impl XxsshgApp {
         }
 
         // 2. Connect results
+        let mut connect_results: Vec<(usize, String, Result<SessionHandle, ConnectError>, bool)> =
+            Vec::new();
         for i in 0..self.tabs.len() {
             if let Tab::Connecting { result_rx, name, .. } = &mut self.tabs[i] {
-                if let Ok(res) = result_rx.try_recv() {
-                    match res {
-                        Ok(handle) => {
-                            let input_tx = handle.input_tx.clone();
-                            let (term, title_rx, bell_rx) =
-                                Terminal::new(80, 24, self.gcfg.scrollback_lines, input_tx);
-                            self.tabs[i] = Tab::Open {
-                                name: name.clone(),
-                                term,
-                                title_rx,
-                                bell_rx,
-                                handle,
-                                resize_sent: false,
-                                closed: None,
-                                bell_flash: false,
-                            };
-                        }
-                        Err(e) => {
-                            let msg = e.message(lang);
-                            self.tabs[i] = Tab::Failed { name: name.clone(), error: msg };
-                        }
+                match result_rx.try_recv() {
+                    Ok(res) => {
+                        log::info!("connect result: ok={}", res.is_ok());
+                        connect_results.push((i, name.clone(), res, false));
                     }
+                    Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                        log::error!("connect task died without a result (panic?)");
+                        connect_results.push((
+                            i,
+                            name.clone(),
+                            Err(ConnectError::Other("connect task crashed (see log)".into())),
+                            true,
+                        ));
+                    }
+                    Err(_) => {}
+                }
+            }
+        }
+        // apply in reverse so indices stay valid
+        for (i, name, res, _) in connect_results.into_iter().rev() {
+            match res {
+                Ok(handle) => {
+                    let input_tx = handle.input_tx.clone();
+                    let (term, title_rx, bell_rx) =
+                        Terminal::new(80, 24, self.gcfg.scrollback_lines, input_tx);
+                    self.tabs[i] = Tab::Open {
+                        name,
+                        term,
+                        title_rx,
+                        bell_rx,
+                        handle,
+                        resize_sent: false,
+                        closed: None,
+                        bell_flash: false,
+                    };
+                }
+                Err(e) => {
+                    let msg = e.message(lang);
+                    self.tabs[i] = Tab::Failed { name, error: msg };
                 }
             }
         }
@@ -853,6 +887,17 @@ impl XxsshgApp {
 impl eframe::App for XxsshgApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+
+        // Headless test hook: XXSSHG_AUTOCONNECT=<server name> connects on startup
+        if !self.autoconnect_done {
+            self.autoconnect_done = true;
+            if let Ok(name) = std::env::var("XXSSHG_AUTOCONNECT") {
+                if let Some(idx) = self.servers.iter().position(|s| s.name == name) {
+                    log::info!("autoconnect: {name}");
+                    self.connect_server(idx);
+                }
+            }
+        }
 
         // Poll background session activity every frame; keep repainting while
         // any tab is live so output keeps flowing even without user input.

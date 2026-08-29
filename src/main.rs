@@ -47,13 +47,17 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
 
+    // NB: `rt` must stay alive in this scope for the whole app lifetime — a Runtime
+    // dropped (e.g. moved into the creator closure, which eframe discards after the
+    // first call) silently shuts down all background session tasks.
+    let rt_handle = rt.handle().clone();
     eframe::run_native(
         "xxsshg",
         options,
         Box::new(move |cc| {
             install_fonts(cc);
             Ok(Box::new(XxsshgApp::new(
-                rt.handle().clone(),
+                rt_handle.clone(),
                 servers_path,
                 settings_path,
                 gui_path,
