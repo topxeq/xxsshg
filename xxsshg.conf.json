@@ -1,0 +1,44 @@
+{
+    "name": "xxsshg",
+    "subtitle": "xxssh 的图形界面版 — 轻量级 GUI SSH 客户端",
+    "category": "开发工具",
+    "tags": [
+        "SSH",
+        "终端",
+        "GUI",
+        "跨平台",
+        "开发工具"
+    ],
+    "description": "## xxsshg (xxssh GUI)\n\nxxssh 的图形界面版本：轻量级 SSH 客户端，与 xxssh **共用同一份配置文件**，单文件运行、无运行时依赖。\n\n### 核心特性\n\n- **与 xxssh 配置互通**：直接读写 `~/.xxssh/servers.json`（密码 TXDEF 加密格式兼容），两边保存的服务器互相可见\n- **多标签终端**：256 色/truecolor、vim/htop 等全屏程序、CJK 双宽字符、回滚缓冲、选中复制、括号粘贴\n- **本地终端**：一键打开 CMD / PowerShell（ConPTY 真终端，支持 clink 自动注入）\n- **保活**：与 xxssh 一致，20s 心跳 × 3 次无响应判死\n- **认证**：密码 / 私钥（含加密私钥）；首次连接主机指纹确认并持久化\n- **SOCKS5 代理**：服务器独立代理 > 全局代理，合并规则与 xxssh 相同\n- **中/英/繁界面**、深浅主题、终端字体可选（Cascadia/Consolas 等）、Ctrl+= 缩放\n\n### 技术栈\n\n纯 Rust：egui/eframe（GUI）+ alacritty_terminal（VT 终端模拟）+ russh（SSH，与 xxssh 同版）。Windows 下静态 CRT 单文件约 14MB。\n\n### 配置文件\n\n| 文件 | 归属 |\n|------|------|\n| `~/.xxssh/servers.json` | 与 xxssh 共用 |\n| `~/.xxssh/settings.json` | 与 xxssh 共用 |\n| `~/.xxssh/gui.json` | xxsshg 独有（窗口/主题/字体等） |\n\n环境变量 `XXSSHG_CONFIG`、`XXSSHG_GUI_CONFIG` 可分别覆盖路径。\n\n### 构建\n\n```bash\ncargo build --release\n# 产物：target/release/xxsshg.exe（单文件）\ncargo test\n```",
+    "icon": "xxssh-icon.png",
+    "screenshots": [],
+    "platforms": [
+        {
+            "name": "Windows",
+            "package": "D:/aiprjs/xxssh/repo-gui/target/release/xxsshg.exe",
+            "minOsVersion": "Windows 10+",
+            "arch": "x64"
+        }
+    ],
+    "installScripts": [
+        {
+            "platform": "windows",
+            "label": "Windows 一键安装",
+            "type": "script",
+            "content": "irm https://magicdo.top/install/xxsshg.ps1 | iex"
+        }
+    ],
+    "docs": [
+        {
+            "title": "快速开始",
+            "slug": "quickstart",
+            "content": "## 首次使用\n\n1. 启动 xxsshg，左侧自动加载 xxssh 已保存的服务器列表\n2. 单击选中，双击（或点 Connect）连接\n3. New / Edit / Delete 管理服务器；右键标签页可关闭\n4. 底部 CMD / PowerShell 按钮打开本地终端\n\n## 终端操作\n\n| 操作 | 方式 |\n|------|------|\n| 复制 | 拖选后 Ctrl+C / 右键（有选区时） |\n| 粘贴 | Ctrl+V / 右键（无选区时） |\n| 回滚 | 滚轮（方向可在设置中反转） |\n| 字号 | Ctrl+= / Ctrl+- / Ctrl+0 |\n| 中文输入 | 直接切换输入法，拼音组词内联显示 |\n\n## 设置\n\n☰ 菜单 → Settings：界面语言（中/英/繁）、主题、终端字体（Cascadia Mono / Consolas 等）、字号、回滚行数、选中即复制、铃声、滚轮方向。\n\n- GUI 设置保存在 `~/.xxssh/gui.json`\n- 语言和全局代理保存在 `~/.xxssh/settings.json`（与 xxssh 共享）\n- 窗口大小和位置在退出时自动记忆\n\n## 与 xxssh 的关系\n\nxxsshg 与 xxssh（TUI/CLI）共用 `~/.xxssh` 下的服务器列表和设置，格式完全兼容——xxssh 保存的服务器在 xxsshg 里直接可用，反之亦然。两个程序独立安装、独立更新，可单独使用其一。",
+            "format": "markdown",
+            "order": 1
+        }
+    ],
+    "featured": true,
+    "featuredOrder": 6,
+    "homepageBadge": "v0.1.0",
+    "homepageSection": "downloads"
+}
