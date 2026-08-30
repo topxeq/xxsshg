@@ -140,10 +140,10 @@ fn compute_baseline_shift(cjk_path: &str) {
     };
     let (asc_l, desc_l, gap_l) = em(&latin_font);
     let (asc_c, desc_c, gap_c) = em(&cjk_font);
-    let row_l = asc_l - desc_l + gap_l;
-    let row_c = asc_c - desc_c + gap_c;
-    // Align baselines (paint: baseline = center - row_height/2 + ascent)
-    let shift_em = (row_c - row_l) / 2.0 + (asc_l - asc_c);
+    let _ = (desc_l, gap_l, desc_c, gap_c);
+    // Paint uses TOP alignment: baseline = draw_y + ascent(font).
+    // Shift CJK glyphs by the ascent difference so both baselines coincide.
+    let shift_em = asc_l - asc_c;
     let _ = CJK_BASELINE_SHIFT_EM.set(shift_em);
 }
 

@@ -280,8 +280,6 @@ impl Terminal {
             ),
             egui::Sense::click() | egui::Sense::drag(),
         );
-        let painter = ui.painter_at(rect);
-
         // Cell metrics from the monospace font
         let font_id = egui::FontId::monospace(font_size);
         // Snap cell metrics and the grid origin to whole physical pixels:
@@ -311,6 +309,11 @@ impl Terminal {
         let origin = egui::pos2(q(rect.min.x), q(rect.min.y));
         self.cell_w = cell_w;
         self.cell_h = cell_h;
+
+        // Headroom for the first row's ascenders (tall CJK glyphs at the top
+        // edge would otherwise be clipped by the widget rect)
+
+        let painter = ui.painter_at(rect.expand2(egui::vec2(0.0, cell_h * 0.35)));
 
         // Compute grid size and resize both local model and remote PTY
         let cols = ((rect.width() / cell_w).floor() as u16).max(2);
@@ -376,8 +379,8 @@ impl Terminal {
                     y
                 };
                 painter.text(
-                    egui::pos2(x, q(y_draw + cell_h * 0.5)),
-                    egui::Align2::LEFT_CENTER,
+                    egui::pos2(x, q(y_draw)),
+                    egui::Align2::LEFT_TOP,
                     ch.to_string(),
                     mono_id.clone(),
                     fg,
@@ -408,8 +411,8 @@ impl Terminal {
                     egui::Color32::from_rgba_unmultiplied(70, 110, 190, 120),
                 );
                 painter.text(
-                    egui::pos2(px, q(py + cell_h * 0.5)),
-                    egui::Align2::LEFT_CENTER,
+                    egui::pos2(px, q(py)),
+                    egui::Align2::LEFT_TOP,
                     &self.preedit,
                     mono_id.clone(),
                     egui::Color32::WHITE,
@@ -418,28 +421,12 @@ impl Terminal {
         }
 
         // Cursor (only on the visible screen when not scrolled into history)
-        // XXSSHG_DEBUG_CURSOR=1: overlay the model's cursor cell numbers to
-        // arbitrate "model vs draw" cursor-position disputes.
-        let debug_cursor = true;
         {
             let cp0 = grid.cursor.point;
             diag_log(&format!(
                 "paint: cursor=({},{}), offset={}, grid={}x{}, cell={}x{}, origin=({:.1},{:.1}), ppp={:.2}, font={:.1}",
                 cp0.line.0, cp0.column.0, offset, self.rows, self.cols, cell_w, cell_h, origin.x, origin.y, ppp, font_size
             ));
-        }
-        if debug_cursor && offset == 0 {
-            let cp = grid.cursor.point;
-            painter.text(
-                egui::pos2(origin.x + 4.0, origin.y + 14.0),
-                egui::Align2::LEFT_CENTER,
-                format!(
-                    "cursor: line={} col={} | offset={} | rows={} cols={} | cw={:.2} ch={:.2}",
-                    cp.line.0, cp.column.0, offset, self.rows, self.cols, cell_w, cell_h
-                ),
-                egui::FontId::monospace(12.0),
-                egui::Color32::YELLOW,
-            );
         }
         if offset == 0 {
             let cp = grid.cursor.point;
