@@ -21,6 +21,13 @@ mod xconfig;
 use app::XxsshgApp;
 
 fn main() -> eframe::Result {
+    // --version for install scripts (matches \d+\.\d+\.\d+)
+    let args: Vec<String> = std::env::args().collect();
+    if args.iter().any(|a| a == "--version" || a == "-V") {
+        println!("xxsshg v{} ({})", env!("CARGO_PKG_VERSION"), env!("XXSSHG_BUILD_HASH"));
+        return Ok(());
+    }
+
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
         .init();
 
