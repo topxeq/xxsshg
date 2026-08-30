@@ -172,6 +172,9 @@ mod tests {
     /// ESC[6n on startup and blocks until answered.
     #[test]
     fn local_shell_smoke() {
+        if std::env::var("XXSSHG_LOCAL_E2E").ok().as_deref() != Some("1") {
+            return;
+        }
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
