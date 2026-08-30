@@ -66,6 +66,10 @@ const T: &[(&str, &str, &str, &str)] = &[
     ("btn_cancel", "Cancel", "取消", "取消"),
     ("btn_close_tab", "Close", "关闭", "關閉"),
     ("menu_about", "About", "关于", "關於"),
+    ("local_title", "Local", "本地终端", "本地終端"),
+    ("local_cmd", "CMD", "CMD", "CMD"),
+    ("local_pwsh", "PowerShell", "PowerShell", "PowerShell"),
+    ("local_shell", "Shell", "Shell", "Shell"),
     ("about_text", "A lightweight GUI SSH client sharing xxssh's config.
 Single binary, no runtime dependencies.
 

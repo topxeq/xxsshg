@@ -11,6 +11,7 @@ use tokio::sync::{mpsc, oneshot};
 use crate::fonts;
 use crate::gconfig::{BellMode, GuiConfig, Theme};
 use crate::i18n::{tpl, tr, Language};
+use crate::local::{self, ShellKind};
 use crate::session::{self, ConnectError, ConnectOpts, ConnectRequest, SessionEvent, SessionHandle};
 use crate::term::Terminal;
 use crate::xconfig::{load_settings, save_settings, AppSettings, AuthMethod, Server};
@@ -270,6 +271,35 @@ impl XxsshgApp {
         self.active_tab = self.tabs.len() - 1;
     }
 
+    /// Open a local shell (CMD / PowerShell / $SHELL) in a new tab
+    fn open_local_shell(&mut self, kind: ShellKind) {
+        let (cols, rows) = self.last_grid;
+        match local::spawn(&self.rt, kind, cols, rows) {
+            Ok(handle) => {
+                let input_tx = handle.input_tx.clone();
+                let (term, title_rx, bell_rx) =
+                    Terminal::new(cols, rows, self.gcfg.scrollback_lines, input_tx);
+                let name = match kind {
+                    ShellKind::Cmd => tpl(tr(self.lang(), "local_cmd"), &[]),
+                    ShellKind::PowerShell => tpl(tr(self.lang(), "local_pwsh"), &[]),
+                    ShellKind::DefaultShell => tpl(tr(self.lang(), "local_shell"), &[]),
+                };
+                self.tabs.push(Tab::Open {
+                    name,
+                    term,
+                    title_rx,
+                    bell_rx,
+                    handle,
+                    resize_sent: false,
+                    closed: None,
+                    bell_flash: false,
+                });
+                self.active_tab = self.tabs.len() - 1;
+            }
+            Err(e) => self.toast(e),
+        }
+    }
+
     fn close_tab(&mut self, idx: usize) {
         let tab = self.tabs.remove(idx);
         if let Tab::Open { handle, .. } = tab {
@@ -468,10 +498,31 @@ impl XxsshgApp {
                 ui.add_space(4.0);
             });
 
-        // Heading + server list fill the remaining space
+        // Heading + local shells + server list fill the remaining space
         ui.add_space(6.0);
         ui.heading(tpl(tr(self.lang(), "list_title"), &[]));
         ui.add_space(4.0);
+        ui.separator();
+
+        // Local shells (never part of servers.json)
+        ui.label(egui::RichText::new(tpl(tr(self.lang(), "local_title"), &[])).weak().small());
+        ui.horizontal_wrapped(|ui| {
+            let shells: Vec<ShellKind> = if cfg!(windows) {
+                vec![ShellKind::Cmd, ShellKind::PowerShell]
+            } else {
+                vec![ShellKind::DefaultShell]
+            };
+            for kind in shells {
+                let label = match kind {
+                    ShellKind::Cmd => tpl(tr(self.lang(), "local_cmd"), &[]),
+                    ShellKind::PowerShell => tpl(tr(self.lang(), "local_pwsh"), &[]),
+                    ShellKind::DefaultShell => tpl(tr(self.lang(), "local_shell"), &[]),
+                };
+                if ui.small_button(label).clicked() {
+                    self.open_local_shell(kind);
+                }
+            }
+        });
         ui.separator();
         egui::ScrollArea::vertical()
             .auto_shrink([false, false]) // span the full sidebar width: scrollbar hugs the edge

@@ -49,6 +49,7 @@ impl EventListener for EventProxy {
     fn send_event(&self, event: Event) {
         match event {
             Event::PtyWrite(text) => {
+                eprintln!("[diag] PtyWrite response: {:?}", text);
                 let _ = self.input_tx.send(text.into_bytes());
             }
             Event::Title(title) => {
