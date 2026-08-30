@@ -852,6 +852,16 @@ mod e2e_tests {
         if !matches!(std::env::var("XXSSHG_E2E").unwrap_or_default().as_str(), "1" | "2") {
             return;
         }
+        // Test-target credentials come from the environment ONLY — never hardcode
+        // server addresses or passwords in the source.
+        let (Ok(test_host), Ok(test_user), Ok(test_pass)) = (
+            std::env::var("XXSSHG_TEST_HOST"),
+            std::env::var("XXSSHG_TEST_USER"),
+            std::env::var("XXSSHG_TEST_PASS"),
+        ) else {
+            eprintln!("skipping e2e: set XXSSHG_TEST_HOST / XXSSHG_TEST_USER / XXSSHG_TEST_PASS");
+            return;
+        };
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -859,11 +869,11 @@ mod e2e_tests {
             .unwrap();
         let server = Server {
             name: "test".into(),
-            host: "TEST_HOST_REDACTED".into(),
+            host: test_host.into(),
             port: 22,
-            username: "root".into(),
+            username: test_user.into(),
             auth: AuthMethod::Password,
-            password: "REDACTED".into(),
+            password: test_pass.into(),
             key_path: String::new(),
             key_passphrase: String::new(),
             proxy: String::new(),
