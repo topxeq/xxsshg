@@ -486,10 +486,15 @@ impl XxsshgApp {
                     !self.servers.is_empty() && self.selected_server < self.servers.len();
                 ui.horizontal(|ui| {
                     let lang = self.lang();
+                    // Reserve fixed slots for the two square buttons (⚡ / ☰) plus
+                    // inter-item spacing, so the row can never overflow the panel
+                    // no matter what width is available.
+                    let small_w = 26.0;
+                    let spacing = ui.style().spacing.item_spacing.x;
+                    let conn_w = (ui.available_width() - 2.0 * small_w - 2.0 * spacing - 8.0).max(60.0);
                     ui.add_enabled_ui(can_connect, |ui| {
-                        let btn_w = ui.available_width() - 34.0;
                         let connect_btn = ui.add_sized(
-                            [btn_w, 26.0],
+                            [conn_w, 26.0],
                             egui::Button::new(
                                 egui::RichText::new(tpl(tr(lang, "btn_connect"), &[])).strong(),
                             ),
@@ -498,8 +503,10 @@ impl XxsshgApp {
                             self.connect_server(self.selected_server);
                         }
                     });
-                    let quick_btn = ui.button("⚡")
-                        .on_hover_text(tpl(tr(lang, "qc_title"), &[]));
+                    let quick_btn = ui.add_sized(
+                        [small_w, 26.0],
+                        egui::Button::new("⚡"),
+                    ).on_hover_text(tpl(tr(lang, "qc_title"), &[]));
                     if quick_btn.clicked() {
                         self.quick = Some(QuickForm::from_gcfg(&self.gcfg));
                         self.quick_open = true;
