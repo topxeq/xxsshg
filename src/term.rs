@@ -443,14 +443,18 @@ impl Terminal {
                 } else {
                     egui::Color32::TRANSPARENT
                 };
+                // The block covers the glyph's em box (1.0x font size), not the
+                // whole line box: text is TOP-aligned so the extra leading below
+                // the glyphs would otherwise make the cursor sit visually low.
+                let block_h = q(font_size);
                 painter.rect_filled(
-                    egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(cell_w, cell_h)),
+                    egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(cell_w, block_h)),
                     0.0,
                     color,
                 );
                 if stroke != egui::Stroke::NONE {
                     painter.rect_stroke(
-                        egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(cell_w, cell_h)),
+                        egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(cell_w, block_h)),
                         0.0,
                         stroke,
                         egui::StrokeKind::Inside,
