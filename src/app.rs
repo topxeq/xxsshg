@@ -473,7 +473,9 @@ impl XxsshgApp {
         ui.heading(tpl(tr(self.lang(), "list_title"), &[]));
         ui.add_space(4.0);
         ui.separator();
-        egui::ScrollArea::vertical().show(ui, |ui| {
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false]) // span the full sidebar width: scrollbar hugs the edge
+            .show(ui, |ui| {
             for i in 0..self.servers.len() {
                 let name = self.servers[i].name.clone();
                 let host = format!(
