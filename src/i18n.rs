@@ -64,6 +64,8 @@ const T: &[(&str, &str, &str, &str)] = &[
     ("f_proxy", "SOCKS5 proxy (optional)", "SOCKS5 代理（可选）", "SOCKS5 代理（可選）"),
     ("btn_save", "Save", "保存", "儲存"),
     ("btn_cancel", "Cancel", "取消", "取消"),
+    ("qc_title", "Quick Connect", "快速连接", "快速連接"),
+    ("qc_connect", "Connect", "连接", "連線"),
     ("btn_close_tab", "Close", "关闭", "關閉"),
     ("menu_about", "About", "关于", "關於"),
     ("local_title", "Local", "本地终端", "本地終端"),

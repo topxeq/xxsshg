@@ -134,6 +134,42 @@ impl ServerForm {
     }
 }
 
+/// Quick Connect dialog state: connect without saving to servers.json
+struct QuickForm {
+    host: String,
+    port: String,
+    username: String,
+    password: String,
+    error: Option<String>,
+}
+
+impl QuickForm {
+    fn from_gcfg(g: &GuiConfig) -> Self {
+        Self {
+            host: g.quick_host.clone(),
+            port: g.quick_port.to_string(),
+            username: if g.quick_user.is_empty() { "root".into() } else { g.quick_user.clone() },
+            password: String::new(),
+            error: None,
+        }
+    }
+
+    fn build(&self) -> Server {
+        let host = self.host.trim().to_string();
+        Server {
+            name: format!("{host}:{}", self.port.trim()),
+            host,
+            port: self.port.trim().parse().unwrap_or(22),
+            username: self.username.trim().to_string(),
+            auth: AuthMethod::Password,
+            password: self.password.clone(),
+            key_path: String::new(),
+            key_passphrase: String::new(),
+            proxy: String::new(),
+        }
+    }
+}
+
 /// A pending connect-time question awaiting an answer (one dialog at a time)
 struct PendingQuestion {
     question: Question,
@@ -180,6 +216,8 @@ pub struct XxsshgApp {
 
     form: Option<ServerForm>,
     form_open: bool,
+    quick: Option<QuickForm>,
+    quick_open: bool,
     delete_confirm: Option<usize>,
     question: Option<PendingQuestion>,
     settings_open: bool,
@@ -214,6 +252,8 @@ impl XxsshgApp {
             selected_server: 0,
             form: None,
             form_open: false,
+            quick: None,
+            quick_open: false,
             delete_confirm: None,
             question: None,
             settings_open: false,
@@ -242,6 +282,10 @@ impl XxsshgApp {
 
     fn connect_server(&mut self, idx: usize) {
         let Some(server) = self.servers.get(idx).cloned() else { return };
+        self.spawn_connect_tab(server);
+    }
+
+    fn spawn_connect_tab(&mut self, server: Server) {
         let mut opts = resolve_opts(&server, &self.settings);
         // Headless test mode (XXSSHG_AUTOCONNECT): TOFU-trust into the standard
         // known_hosts file so no host-key dialog blocks automated runs.
@@ -256,6 +300,10 @@ impl XxsshgApp {
             );
         }
         let name = server.name.clone();
+        let status = tpl(
+            tr(self.lang(), "status_connecting"),
+            &[("host", &server.host), ("port", &server.port.to_string())],
+        );
         log::info!("connect_server: spawning");
         let (cols, rows) = self.last_grid;
         let (result_rx, request_rx) = session::spawn_connect(&self.rt, server, opts, self.lang(), cols, rows);
@@ -263,10 +311,7 @@ impl XxsshgApp {
             name,
             result_rx,
             request_rx,
-            status: tpl(
-                tr(self.lang(), "status_connecting"),
-                &[("host", &self.servers[idx].host), ("port", &self.servers[idx].port.to_string())],
-            ),
+            status,
         });
         self.active_tab = self.tabs.len() - 1;
     }
@@ -453,6 +498,12 @@ impl XxsshgApp {
                             self.connect_server(self.selected_server);
                         }
                     });
+                    let quick_btn = ui.button("⚡")
+                        .on_hover_text(tpl(tr(lang, "qc_title"), &[]));
+                    if quick_btn.clicked() {
+                        self.quick = Some(QuickForm::from_gcfg(&self.gcfg));
+                        self.quick_open = true;
+                    }
                     ui.menu_button("☰", |ui| {
                         if ui.button(tpl(tr(lang, "settings_title"), &[])).clicked() {
                             self.settings_open = true;
@@ -974,6 +1025,75 @@ impl XxsshgApp {
                 });
             if close {
                 self.settings_open = false;
+            }
+        }
+
+        // Quick Connect dialog
+        if self.quick.is_some() {
+            let mut open = self.quick_open;
+            let mut connect = false;
+            let mut cancel = false;
+            let lang = dlg_lang;
+            let win = egui::Window::new(tr(lang, "qc_title"))
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false);
+            win.show(ui, |ui| {
+                let qc = self.quick.as_mut().unwrap();
+                egui::Grid::new("quick_grid")
+                    .num_columns(2)
+                    .spacing([10.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label(tr(lang, "f_host"));
+                        ui.add(
+                            egui::TextEdit::singleline(&mut qc.host)
+                                .hint_text("example.com")
+                                .desired_width(220.0),
+                        );
+                        ui.end_row();
+                        ui.label(tr(lang, "f_port"));
+                        ui.add(egui::TextEdit::singleline(&mut qc.port).desired_width(80.0));
+                        ui.end_row();
+                        ui.label(tr(lang, "f_user"));
+                        ui.text_edit_singleline(&mut qc.username);
+                        ui.end_row();
+                        ui.label(tr(lang, "f_password"));
+                        ui.add(egui::TextEdit::singleline(&mut qc.password).password(true));
+                        ui.end_row();
+                    });
+                if let Some(err) = &qc.error {
+                    ui.colored_label(egui::Color32::LIGHT_RED, err);
+                }
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui.button(tr(lang, "qc_connect")).clicked() {
+                        connect = true;
+                    }
+                    if ui.button(tr(lang, "btn_cancel")).clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+            self.quick_open = open;
+            if connect {
+                let built = self.quick.as_ref().unwrap().build();
+                if built.host.is_empty() {
+                    self.quick.as_mut().unwrap().error = Some(tr(lang, "err_host_required").into());
+                } else {
+                    // remember host/port/user for next time (never the password)
+                    self.gcfg.quick_host = built.host.clone();
+                    self.gcfg.quick_port = built.port;
+                    self.gcfg.quick_user = built.username.clone();
+                    let _ = crate::gconfig::save(&self.gui_path, &self.gcfg);
+                    let server = built;
+                    self.quick = None;
+                    self.quick_open = false;
+                    self.spawn_connect_tab(server);
+                }
+            }
+            if cancel || !open {
+                self.quick = None;
+                self.quick_open = false;
             }
         }
 

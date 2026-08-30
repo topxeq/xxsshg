@@ -87,6 +87,17 @@ pub struct GuiConfig {
     /// wheel up scrolls back into history)
     #[serde(default)]
     pub invert_scrolling: bool,
+    /// Last Quick Connect values (password is never persisted)
+    #[serde(default)]
+    pub quick_host: String,
+    #[serde(default = "default_port_qc")]
+    pub quick_port: u16,
+    #[serde(default)]
+    pub quick_user: String,
+}
+
+fn default_port_qc() -> u16 {
+    22
 }
 
 fn default_version() -> u32 {
@@ -116,6 +127,9 @@ impl Default for GuiConfig {
             show_sidebar: true,
             bell: BellMode::default(),
             invert_scrolling: false,
+            quick_host: String::new(),
+            quick_port: 22,
+            quick_user: String::from("root"),
         }
     }
 }
