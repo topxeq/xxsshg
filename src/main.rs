@@ -11,7 +11,6 @@ mod app;
 mod fonts;
 mod gconfig;
 mod i18n;
-mod iso_test_tmp;
 mod local;
 mod session;
 mod term;

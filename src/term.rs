@@ -491,6 +491,28 @@ impl Terminal {
             }
         }
 
+        // Selection highlight overlay (drawn per visible row)
+        if let Some((a, b)) = self.selection {
+            let (start, end) = if (a.line, a.col) <= (b.line, b.col) { (a, b) } else { (b, a) };
+            for row_i in 0..self.rows as i32 {
+                let line_abs = row_i - offset as i32;
+                if line_abs < start.line || line_abs > end.line { continue; }
+                let col_start = if line_abs == start.line { start.col } else { 0 };
+                let col_end = if line_abs == end.line { (end.col + 1).min(self.cols as usize) } else { self.cols as usize };
+                let x = q(origin.x + col_start as f32 * cell_w);
+                let w = q((col_end - col_start) as f32 * cell_w);
+                if w > 0.0 {
+                    painter.rect_filled(
+                        egui::Rect::from_min_size(
+                            egui::pos2(x, origin.y + row_i as f32 * cell_h),
+                            egui::vec2(w, cell_h),
+                        ),
+                        0.0,
+                        egui::Color32::from_rgba_unmultiplied(120, 160, 255, 90),
+                    );
+                }
+            }
+        }
         // Cursor (only on the visible screen when not scrolled into history)
         {
             let cp0 = grid.cursor.point;
