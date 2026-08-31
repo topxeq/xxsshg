@@ -1,0 +1,75 @@
+# SFTP dual-pane file browser tab (state, ops and UI).
+
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+
+use russh_sftp::client::SftpSession;
+use tokio::sync::mpsc;
+
+use crate::i18n::{tpl, tr, Language};
+use crate::sftp::{self, FileEntry};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransferKind {
+    Upload,
+    Download,
+}
+
+#[derive(Clone, Debug)]
+pub struct Transfer {
+    pub id: u64,
+    pub kind: TransferKind,
+    pub name: String,
+    pub total: u64,
+    pub done: u64,
+    pub err: Option<String>,
+    pub finished: bool,
+}
+
+pub enum OpMsg {
+    RemoteList { dir: String, entries: Vec<FileEntry> },
+    Error(String),
+    TransferProgress { id: u64, done: u64, total: u64 },
+    TransferDone { id: u64, err: Option<String> },
+    RemoteDirSet(String),
+}
+
+enum ConfirmKind {
+    RemoteDelete,
+    RemoteDeleteDir,
+    LocalDelete,
+    LocalDeleteDir,
+    RemoteRename,
+    RemoteMkdir,
+}
+
+pub struct SftpTab {
+    pub name: String,
+    pub sftp: Arc<Mutex<SftpSession>>,
+    pub close_tx: oneshot::Sender<()>,
+    pub rt: tokio::runtime::Handle,
+    pub lang: Language,
+
+    pub local_dir: PathBuf,
+    pub local_entries: Vec<FileEntry>,
+    pub local_sel: Option<usize>,
+    pub local_edit: String,
+
+    pub remote_dir: String,
+    pub remote_entries: Vec<FileEntry>,
+    pub remote_sel: Option<usize>,
+    pub remote_edit: String,
+
+    pub loading: bool,
+    pub error: Option<String>,
+    op_rx: mpsc::UnboundedReceiver<OpMsg>,
+    op_tx: mpsc::UnboundedSender<OpMsg>,
+
+    pub transfers: Vec<Transfer>,
+    prog_rx: mpsc::UnboundedReceiver<(u64, u64, u64, Option<String>)>,
+    prog_tx: mpsc::UnboundedSender<(u64, u64, u64, Option<String>)>,
+    next_id: u64,
+
+    confirm: Option<(ConfirmKind, String)>,
+    confirm_input: String,
+}

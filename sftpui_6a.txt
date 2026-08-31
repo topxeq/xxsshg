@@ -1,0 +1,123 @@
+
+    /// Render the dual-pane browser + transfers
+    pub fn ui(&mut self, ui: &mut egui::Ui) {
+        if let Some(err) = &self.error.clone() {
+            ui.horizontal(|ui| {
+                ui.colored_label(egui::Color32::LIGHT_RED, format!("⚠ {err}"));
+                if ui.small_button("✕").clicked() {
+                    self.error = None;
+                }
+            });
+        }
+        if self.loading {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label("...");
+            });
+        }
+
+        // ---- remote toolbar ----
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(tpl(tr(self.lang, "sftp_remote"), &[])).strong());
+            let r_go = ui.add(
+                egui::TextEdit::singleline(&mut self.remote_edit).desired_width(240.0),
+            );
+            let enter = r_go.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if ui.button(tpl(tr(self.lang, "sftp_go"), &[])).clicked() || enter {
+                let d = self.remote_edit.clone();
+                self.spawn_refresh_remote(Some(&d), false);
+            }
+            if ui.button(tpl(tr(self.lang, "sftp_up"), &[])).clicked() {
+                let up = sftp::join_remote(&self.remote_dir, "..");
+                self.spawn_refresh_remote(Some(&up), true);
+            }
+            if ui.button(tpl(tr(self.lang, "sftp_refresh"), &[])).clicked() {
+                self.spawn_refresh_remote(None, false);
+            }
+        });
+
+        // ---- local toolbar ----
+        ui.horizontal(|ui| {
+            ui.label(egui::RichText::new(tpl(tr(self.lang, "sftp_local"), &[])).strong());
+            let r_go = ui.add(
+                egui::TextEdit::singleline(&mut self.local_edit).desired_width(240.0),
+            );
+            let enter = r_go.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            if ui.button(tpl(tr(self.lang, "sftp_go"), &[])).clicked() || enter {
+                let d = PathBuf::from(self.local_edit.trim());
+                if d.is_dir() {
+                    self.local_dir = d.clone();
+                    self.refresh_local();
+                } else {
+                    self.error = Some(d.to_string_lossy().into_owned());
+                }
+            }
+            if ui.button(tpl(tr(self.lang, "sftp_up"), &[])).clicked() {
+                if let Some(p) = self.local_dir.parent() {
+                    self.local_dir = p.to_path_buf();
+                    self.refresh_local();
+                }
+            }
+            if ui.button(tpl(tr(self.lang, "sftp_refresh"), &[])).clicked() {
+                self.refresh_local();
+            }
+        });
+
+        ui.add_space(2.0);
+
+        // ---- transfer buttons row ----
+        ui.horizontal(|ui| {
+            let dl = ui.add_enabled(
+                self.remote_sel.is_some(),
+                egui::Button::new(tpl(tr(self.lang, "sftp_download"), &[])),
+            );
+            if dl.clicked() {
+                self.download_selected();
+            }
+            let ul = ui.add_enabled(
+                self.local_sel.is_some(),
+                egui::Button::new(tpl(tr(self.lang, "sftp_upload"), &[])),
+            );
+            if ul.clicked() {
+                self.upload_selected();
+            }
+            ui.separator();
+            let mk = ui.button(tpl(tr(self.lang, "sftp_new_dir"), &[]));
+            if mk.clicked() {
+                self.confirm_input = String::new();
+                self.confirm = Some((ConfirmKind::RemoteMkdir, String::new()));
+            }
+            let rn = ui.add_enabled(
+                self.remote_sel.is_some(),
+                egui::Button::new(tpl(tr(self.lang, "sftp_rename"), &[])),
+            );
+            if rn.clicked() {
+                if let Some(i) = self.remote_sel {
+                    if let Some(e) = self.remote_entries.get(i) {
+                        self.confirm_input = e.name.clone();
+                        self.confirm = Some((ConfirmKind::RemoteRename, e.name.clone()));
+                    }
+                }
+            }
+            let del = ui.add_enabled(
+                self.remote_sel.is_some() || self.local_sel.is_some(),
+                egui::Button::new(egui::RichText::new(tpl(tr(self.lang, "sftp_delete"), &[])).color(egui::Color32::LIGHT_RED)),
+            );
+            if del.clicked() {
+                if let Some(i) = self.remote_sel {
+                    if let Some(e) = self.remote_entries.get(i) {
+                        self.confirm = Some((
+                            if e.is_dir { ConfirmKind::RemoteDeleteDir } else { ConfirmKind::RemoteDelete },
+                            e.name.clone(),
+                        ));
+                    }
+                } else if let Some(i) = self.local_sel {
+                    if let Some(e) = self.local_entries.get(i) {
+                        self.confirm = Some((
+                            if e.is_dir { ConfirmKind::LocalDeleteDir } else { ConfirmKind::LocalDelete },
+                            e.name.clone(),
+                        ));
+                    }
+                }
+            }
+        });

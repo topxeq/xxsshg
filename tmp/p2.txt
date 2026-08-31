@@ -1,0 +1,7 @@
+/// Authenticated session -> PTY + shell + endpoints for a GUI terminal tab.
+async fn open_pty_after_auth(
+    mut session: client::Handle<Handler>,
+    server: &Server,
+    cols: u16,
+    rows: u16,
+) -> Result<SessionHandle, ConnectError> {

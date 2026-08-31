@@ -12,6 +12,7 @@ use crate::fonts;
 use crate::gconfig::{BellMode, GuiConfig, Theme};
 use crate::i18n::{tpl, tr, Language};
 use crate::local::{self, ShellKind};
+use crate::sftpui::SftpTab;
 use crate::session::{self, ConnectError, ConnectOpts, ConnectRequest, SessionEvent, SessionHandle};
 use crate::term::Terminal;
 use crate::xconfig::{load_settings, save_settings, AppSettings, AuthMethod, Server};
@@ -59,6 +60,15 @@ enum Tab {
         name: String,
         error: String,
     },
+    SftpConnecting {
+        name: String,
+        result_rx: oneshot::Receiver<Result<crate::session::SftpClient, ConnectError>>,
+        request_rx: mpsc::UnboundedReceiver<ConnectRequest>,
+        status: String,
+    },
+    Sftp {
+        st: Box<SftpTab>,
+    },
 }
 
 impl Tab {
@@ -67,6 +77,8 @@ impl Tab {
             Tab::Connecting { name, .. }
             | Tab::Open { name, .. }
             | Tab::Failed { name, .. } => name,
+            Tab::Sftp { st } => &st.name,
+            Tab::SftpConnecting { name, .. } => name,
         }
     }
 }
@@ -358,10 +370,32 @@ impl XxsshgApp {
         }
     }
 
+    /// Open an SFTP file-manager tab for the server
+    fn open_sftp_for(&mut self, idx: usize) {
+        let Some(server) = self.servers.get(idx).cloned() else { return };
+        let opts = resolve_opts(&server, &self.settings);
+        let name = format!("SFTP: {}", server.name);
+        let host = server.host.clone();
+        let (result_rx, request_rx) = crate::session::spawn_sftp(&self.rt, server, opts);
+        self.tabs.push(Tab::SftpConnecting {
+            name,
+            result_rx,
+            request_rx,
+            status: tpl(tr(self.lang(), "sftp_connecting"), &[("host", &host)]),
+        });
+        self.active_tab = self.tabs.len() - 1;
+    }
+
     fn close_tab(&mut self, idx: usize) {
         let tab = self.tabs.remove(idx);
-        if let Tab::Open { handle, .. } = tab {
-            let _ = handle.close_tx.send(());
+        match tab {
+            Tab::Open { handle, .. } => {
+                let _ = handle.close_tx.send(());
+            }
+            Tab::Sftp { st, .. } => {
+                let _ = st.close_tx.send(());
+            }
+            _ => {}
         }
         self.active_tab = self.active_tab.min(self.tabs.len().saturating_sub(1));
     }
@@ -377,6 +411,29 @@ impl XxsshgApp {
         // 1. Connect-time questions (password / passphrase / host key)
         for i in 0..self.tabs.len() {
             if let Tab::Connecting { request_rx, .. } = &mut self.tabs[i] {
+                if self.question.is_none() {
+                    if let Some(req) = request_rx.try_recv().ok() {
+                        self.question = Some(PendingQuestion {
+                            question: match req {
+                                ConnectRequest::Password { user, host, respond } => {
+                                    Question::Password { user, host, respond: Some(respond), input: String::new() }
+                                }
+                                ConnectRequest::Passphrase { path, respond } => {
+                                    Question::Passphrase { path, respond: Some(respond), input: String::new() }
+                                }
+                                ConnectRequest::HostKey { host, port, fingerprint, changed, respond } => {
+                                    Question::HostKey { host, port, fingerprint, changed, respond: Some(respond) }
+                                }
+                            },
+                        });
+                    }
+                }
+            }
+        }
+
+        // 1b. SFTP connecting: auth questions + results
+        for i in 0..self.tabs.len() {
+            if let Tab::SftpConnecting { request_rx, .. } = &mut self.tabs[i] {
                 if self.question.is_none() {
                     if let Some(req) = request_rx.try_recv().ok() {
                         self.question = Some(PendingQuestion {
@@ -441,6 +498,32 @@ impl XxsshgApp {
                 Err(e) => {
                     let msg = e.message(lang);
                     self.tabs[i] = Tab::Failed { name, error: msg };
+                }
+            }
+        }
+
+        // 2b. SFTP connect results
+        for i in 0..self.tabs.len() {
+            if let Tab::SftpConnecting { name, result_rx, .. } = &mut self.tabs[i] {
+                if let Ok(res) = result_rx.try_recv() {
+                    match res {
+                        Ok(client) => {
+                            let local_root = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+                            let st = SftpTab::new(
+                                name.clone(),
+                                client.sftp,
+                                client.close_tx,
+                                self.rt.clone(),
+                                self.lang(),
+                                local_root,
+                            );
+                            self.tabs[i] = Tab::Sftp { st: Box::new(st) };
+                        }
+                        Err(e) => {
+                            let msg = e.message(lang);
+                            self.tabs[i] = Tab::Failed { name: name.clone(), error: msg };
+                        }
+                    }
                 }
             }
         }
@@ -599,24 +682,55 @@ impl XxsshgApp {
             }
         });
         ui.separator();
+        // Heading + quick-add button
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            ui.heading(tpl(tr(self.lang(), "list_title"), &[]));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui.small_button("＋").on_hover_text(tpl(tr(self.lang(), "btn_new"), &[])).clicked() {
+                    self.form = Some(ServerForm::new());
+                    self.form_open = true;
+                }
+            });
+        });
+        ui.add_space(4.0);
+        ui.separator();
         egui::ScrollArea::vertical()
             .auto_shrink([false, false]) // span the full sidebar width: scrollbar hugs the edge
             .show(ui, |ui| {
             for i in 0..self.servers.len() {
                 let name = self.servers[i].name.clone();
-                let host = format!(
-                    "{}@{}:{}",
-                    self.servers[i].username, self.servers[i].host, self.servers[i].port
+                let host = format!("{}@{}:{}", self.servers[i].username, self.servers[i].host, self.servers[i].port);
+                let resp = ui.selectable_label(
+                    i == self.selected_server,
+                    egui::RichText::new(format!("{name}\n  {host}")),
                 );
-                let resp =
-                    ui.selectable_label(i == self.selected_server, format!("{name}
-  {host}"));
                 if resp.clicked() {
                     self.selected_server = i;
                     if resp.double_clicked() {
                         self.connect_server(i);
                     }
                 }
+                resp.context_menu(|ui| {
+                    if ui.button(tpl(tr(self.lang(), "btn_connect"), &[])).clicked() {
+                        self.connect_server(i);
+                        ui.close();
+                    }
+                    if ui.button(tpl(tr(self.lang(), "menu_sftp"), &[])).clicked() {
+                        self.open_sftp_for(i);
+                        ui.close();
+                    }
+                    if ui.button(tpl(tr(self.lang(), "btn_edit"), &[])).clicked() {
+                        let srv = self.servers[i].clone();
+                        self.form = Some(ServerForm::from_server(i, &srv));
+                        self.form_open = true;
+                        ui.close();
+                    }
+                    if ui.button(tpl(tr(self.lang(), "btn_delete"), &[])).clicked() {
+                        self.delete_confirm = Some(i);
+                        ui.close();
+                    }
+                });
             }
         });
     }
@@ -670,6 +784,16 @@ impl XxsshgApp {
             Tab::Failed { error, .. } => {
                 ui.centered_and_justified(|ui| {
                     ui.colored_label(egui::Color32::LIGHT_RED, error.clone());
+                });
+            }
+            Tab::Sftp { st } => {
+                st.poll();
+                st.ui(ui);
+            }
+            Tab::SftpConnecting { status, .. } => {
+                ui.centered_and_justified(|ui| {
+                    ui.label(status.clone());
+                    ui.spinner();
                 });
             }
             Tab::Open { term, handle, resize_sent, closed, bell_flash, .. } => {
@@ -1364,5 +1488,10 @@ impl eframe::App for XxsshgApp {
         });
 
         self.dialogs(ui);
+
+        // SFTP confirm windows (active sftp tab)
+        if let Some(Tab::Sftp { st }) = self.tabs.get_mut(self.active_tab) {
+            st.confirm_ui(ui);
+        }
     }
 }

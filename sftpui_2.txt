@@ -1,0 +1,96 @@
+
+impl SftpTab {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        name: String,
+        sftp: Arc<Mutex<SftpSession>>,
+        close_tx: oneshot::Sender<()>,
+        rt: tokio::runtime::Handle,
+        lang: Language,
+        local_root: PathBuf,
+    ) -> Self {
+        let (op_tx, op_rx) = mpsc::unbounded_channel();
+        let (prog_tx, prog_rx) = mpsc::unbounded_channel();
+        let mut st = Self {
+            name,
+            sftp: sftp.clone(),
+            close_tx,
+            rt,
+            lang,
+            local_dir: local_root.clone(),
+            local_entries: Vec::new(),
+            local_sel: None,
+            local_edit: local_root.to_string_lossy().into_owned(),
+            remote_dir: String::from("/"),
+            remote_entries: Vec::new(),
+            remote_sel: None,
+            remote_edit: String::new(),
+            loading: true,
+            error: None,
+            op_rx,
+            op_tx,
+            transfers: Vec::new(),
+            prog_rx,
+            prog_tx,
+            next_id: 1,
+            confirm: None,
+            confirm_input: String::new(),
+        };
+        st.refresh_local();
+        // initial remote listing: home dir via canonicalize(".")
+        st.spawn_refresh_remote(Some("."), true);
+        st
+    }
+
+    pub fn refresh_local(&mut self) {
+        let dir = self.local_dir.clone();
+        let mut entries: Vec<FileEntry> = Vec::new();
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                let Ok(ft) = e.file_type() else { continue };
+                let Ok(md) = e.metadata() else { continue };
+                entries.push(FileEntry {
+                    name: e.file_name().to_string_lossy().into_owned(),
+                    is_dir: ft.is_dir(),
+                    size: md.len(),
+                    mtime: md
+                        .modified()
+                        .ok()
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs() as u32)
+                        .unwrap_or(0),
+                });
+            }
+        }
+        sftp::sort_entries(&mut entries);
+        self.local_entries = entries;
+        self.local_edit = dir.to_string_lossy().into_owned();
+    }
+
+    pub fn spawn_refresh_remote(&mut self, dir: Option<&str>, resolve_cwd: bool) {
+        if self.busy {
+            return;
+        }
+        self.busy = true;
+        self.loading = true;
+        let sftp = self.sftp.clone();
+        let tx = self.op_tx.clone();
+        let start = dir
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| self.remote_dir.clone());
+        self.rt.spawn(async move {
+            if resolve_cwd {
+                if let Ok(cwd) = sftp.lock().await.canonicalize(".").await {
+                    let _ = tx.send(OpMsg::RemoteDirSet(cwd));
+                }
+            }
+            match sftp.lock().await.list(&start).await {
+                Err(e) => {
+                    let _ = tx.send(OpMsg::Error(e));
+                }
+                Ok(entries) => {
+                    let _ = tx.send(OpMsg::RemoteList { dir: start, entries });
+                }
+            }
+        });
+    }

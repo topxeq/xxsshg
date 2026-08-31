@@ -1,0 +1,71 @@
+
+    /// SFTP ops: mkdir / rename / delete on remote; delete on local
+    fn op_mkdir_remote(&mut self, name: String) {
+        let dir = self.remote_dir.clone();
+        let sftp = self.sftp.clone();
+        let tx = self.op_tx.clone();
+        self.busy = true;
+        self.rt.spawn(async move {
+            let path = sftp::join_remote(&dir, &name);
+            if let Err(e) = sftp::mkdir_all(&sftp, &path).await {
+                let _ = tx.send(OpMsg::Error(e));
+            }
+            let _ = tx.send(OpMsg::RemoteList { dir, entries: Vec::new() });
+        });
+        self.spawn_refresh_remote(None, false);
+    }
+
+    fn op_rename_remote(&mut self, from: String, to: String) {
+        let dir = self.remote_dir.clone();
+        let sftp = self.sftp.clone();
+        let tx = self.op_tx.clone();
+        self.rt.spawn(async move {
+            let a = sftp::join_remote(&dir, &from);
+            let b = sftp::join_remote(&dir, &to);
+            if let Err(e) = sftp.rename(&sftp, &a, &b).await {
+                let _ = tx.send(OpMsg::Error(e));
+            }
+        });
+        self.spawn_refresh_remote(None, false);
+    }
+
+    fn op_delete_remote(&mut self, name: String, dir: bool) {
+        let rdir = self.remote_dir.clone();
+        let sftp = self.sftp.clone();
+        let tx = self.op_tx.clone();
+        let path = sftp::join_remote(&rdir, &name);
+        self.rt.spawn(async move {
+            let r = if dir {
+                sftp::delete_recursive(&sftp, &path).await
+            } else {
+                sftp.delete_file(&sftp, &path).await
+            };
+            if let Err(e) = r {
+                let _ = tx.send(OpMsg::Error(e));
+            }
+        });
+        self.spawn_refresh_remote(None, false);
+    }
+
+    fn op_delete_local(&mut self, name: String, dir: bool) {
+        let path = self.local_dir.join(&name);
+        let r = if dir {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        if let Err(e) = r {
+            self.error = Some(e.to_string());
+        }
+        self.refresh_local();
+    }
+
+    fn sftp_rename(&self, old: &str, new: &str) -> Result<(), String> {
+        // sync wrapper executed on the runtime
+        let sftp = self.sftp.clone();
+        let old = old.to_string();
+        let new = new.to_string();
+        self.rt.block_on(async move {
+            sftp.lock().await.rename(&old, &new).await.map_err(|e| e.to_string())
+        })
+    }

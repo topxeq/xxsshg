@@ -1,0 +1,69 @@
+
+    /// Drain op/progress messages; returns (refresh_remote, refresh_local)
+    pub fn poll(&mut self) -> (bool, bool) {
+        let mut refresh_remote = false;
+        let mut refresh_local = false;
+        while let Ok(msg) = self.op_rx.try_recv() {
+            match msg {
+                OpMsg::RemoteList { dir, entries } => {
+                    self.remote_dir = dir;
+                    self.remote_entries = entries;
+                    self.remote_edit = dir.clone();
+                    self.remote_sel = None;
+                    self.loading = false;
+                    refresh_remote = false;
+                }
+                OpMsg::Error(e) => {
+                    self.error = Some(e);
+                    self.loading = false;
+                }
+                OpMsg::RemoteDirSet(d) => {
+                    self.remote_dir = d;
+                    self.remote_edit = d.clone();
+                }
+                OpMsg::TransferProgress { id, done, total } => {
+                    if let Some(t) = self.transfers.iter_mut().find(|t| t.id == id) {
+                        t.done = done;
+                        t.total = total;
+                    }
+                }
+                OpMsg::TransferDone { id, err, rr, rl } => {
+                    if let Some(t) = self.transfers.iter_mut().find(|t| t.id == id) {
+                        t.err = err;
+                        t.finished = true;
+                    }
+                    refresh_remote |= rr;
+                    refresh_local |= rl;
+                }
+            }
+        }
+        if refresh_remote {
+            self.spawn_refresh_remote(None, false);
+        }
+        if refresh_local {
+            self.refresh_local();
+        }
+        (refresh_remote, refresh_local)
+    }
+
+    fn start_transfer(&mut self, kind: TransferKind, name: String, total: u64) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.transfers.push(Transfer {
+            id,
+            kind,
+            name,
+            total,
+            done: 0,
+            err: None,
+            finished: false,
+        });
+        id
+    }
+
+    fn progress_cb(&self, id: u64) -> impl Fn(u64) + Send + Sync + 'static {
+        let tx = self.prog_tx.clone();
+        move |done: u64| {
+            let _ = tx.send((id, done, u64::MAX, None));
+        }
+    }

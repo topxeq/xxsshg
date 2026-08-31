@@ -1,0 +1,111 @@
+
+    /// Upload selected local file/dir into the current remote dir
+    fn upload_selected(&mut self) {
+        let Some(idx) = self.local_sel else { return };
+        let Some(e) = self.local_entries.get(idx) else { return };
+        let lname = e.name.clone();
+        let is_dir = e.is_dir;
+        let lpath = self.local_dir.join(&lname);
+        let rdir = self.remote_dir.clone();
+        let sftp = self.sftp.clone();
+        let rt = self.rt.clone();
+        let tx = self.op_tx.clone();
+        let id = self.start_transfer(
+            TransferKind::Upload,
+            lname.clone(),
+            if is_dir { 0 } else { e.size },
+        );
+        let prog_id = id;
+        let prog_tx = self.prog_tx.clone();
+        self.rt.spawn(async move {
+            let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let total = if is_dir {
+                let (f, b) = sftp::count_local_bytes(&lpath);
+                let _ = f;
+                b
+            } else {
+                std::fs::metadata(&lpath).map(|m| m.len()).unwrap_or(0)
+            };
+            let _ = prog_tx.send((prog_id, 0, total, None));
+            let sftp2 = sftp.clone();
+            let cancel2 = cancel.clone();
+            let prog = move |done: u64| {
+                let _ = prog_tx.send((prog_id, done.min(total), total, None));
+                let _ = sftp2;
+                let _ = cancel2;
+            };
+            let r = if is_dir {
+                sftp::upload_dir_recursive(&sftp, &lpath, &rdir, &prog).await
+            } else {
+                sftp::upload_file(&sftp, &lpath, &rdir, total, &prog).await
+            };
+            let _ = prog_tx.send((
+                prog_id,
+                if r.is_ok() { total } else { 0 },
+                total,
+                r.err(),
+            ));
+            let _ = tx.send(OpMsg::TransferDone {
+                id,
+                err: r.err(),
+                refresh_remote: true,
+                refresh_local: false,
+            });
+            let _ = rt; // keep handle alive for any nested spawns
+        });
+        let _ = rt_holder(rt);
+    }
+
+    /// Download selected remote file/dir into the current local dir
+    fn download_selected(&mut self) {
+        let Some(idx) = self.remote_sel else { return };
+        let Some(e) = self.remote_entries.get(idx) else { return };
+        let rname = e.name.clone();
+        let is_dir = e.is_dir;
+        let size = e.size;
+        let rpath = sftp::join_remote(&self.remote_dir, &rname);
+        let ldir = self.local_dir.clone();
+        let sftp = self.sftp.clone();
+        let rt = self.rt.clone();
+        let tx = self.op_tx.clone();
+        let id = self.start_transfer(
+            TransferKind::Download,
+            rname.clone(),
+            if is_dir { 0 } else { size },
+        );
+        let prog_tx = self.prog_tx.clone();
+        self.rt.spawn(async move {
+            let total = if is_dir {
+                let (f, b) = sftp::count_remote_bytes(&sftp, &rpath).await;
+                let _ = f;
+                b
+            } else {
+                size
+            };
+            let _ = prog_tx.send((id, 0, total, None));
+            let sftp2 = sftp.clone();
+            let prog = move |done: u64| {
+                let _ = prog_tx.send((id, done.min(total), total, None));
+                let _ = sftp2;
+            };
+            let r = if is_dir {
+                sftp::download_dir_recursive(&sftp, &rpath, &ldir, &prog).await
+            } else {
+                sftp::download_file(&sftp, &rpath, &ldir, total, &prog).await
+            };
+            let _ = prog_tx.send((
+                id,
+                if r.is_ok() { total } else { 0 },
+                total,
+                r.err(),
+            ));
+            let _ = tx.send(OpMsg::TransferDone {
+                id,
+                err: r.err(),
+                refresh_remote: false,
+                refresh_local: true,
+            });
+            let _ = rt;
+        });
+        let _ = rt_holder(rt);
+    }

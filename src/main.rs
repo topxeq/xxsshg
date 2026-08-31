@@ -13,6 +13,8 @@ mod gconfig;
 mod i18n;
 mod local;
 mod session;
+mod sftp;
+mod sftpui;
 mod term;
 mod txdef;
 mod xconfig;

@@ -735,6 +735,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "dashmap"
+version = "6.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6361d5c062261c78a176addb82d4c821ae42bed6089de0e12603cd25de2059c"
+dependencies = [
+ "cfg-if",
+ "crossbeam-utils",
+ "hashbrown 0.14.5",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core",
+]
+
+[[package]]
 name = "data-encoding"
 version = "2.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1458,12 +1472,24 @@ checksum = "ed4a1bb24121291d27230c1b1b44e07d6a9b28cefdb32fe1581dfb84e14f940a"
 dependencies = [
  "bytemuck",
  "foldhash",
- "hashbrown",
+ "hashbrown 0.17.1",
  "log",
  "peniko",
  "skrifa",
  "smallvec",
  "vello_common",
+]
+
+[[package]]
+name = "gloo-timers"
+version = "0.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "482ce8a491a501da4cd806bd190275363d674f2845005c6ddbd5d3e1dd54495d"
+dependencies = [
+ "futures-channel",
+ "futures-core",
+ "js-sys",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -1576,6 +1602,12 @@ dependencies = [
 
 [[package]]
 name = "hashbrown"
+version = "0.14.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
+
+[[package]]
+name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
@@ -1685,7 +1717,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "07aa2048142242915a31d35844fb311e0e53fcca590c3a0a40dcf1b841fa09eb"
 dependencies = [
  "equivalent",
- "hashbrown",
+ "hashbrown 0.17.1",
 ]
 
 [[package]]
@@ -3128,6 +3160,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "russh-sftp"
+version = "2.4.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9de67aace74530a29086db0671fa200c470a58eb380081f28ad512ffb0c5356b"
+dependencies = [
+ "bitflags 2.13.1",
+ "bytes",
+ "chrono",
+ "dashmap",
+ "gloo-timers",
+ "log",
+ "serde",
+ "serde_bytes",
+ "thiserror 2.0.20",
+ "tokio",
+ "tokio-util",
+ "wasm-bindgen-futures",
+]
+
+[[package]]
 name = "russh-util"
 version = "0.52.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3268,6 +3320,16 @@ checksum = "4148590afebada386688f18773da617792bf2ef03ffc1e4cbd2b1d45b023e0ba"
 dependencies = [
  "serde_core",
  "serde_derive",
+]
+
+[[package]]
+name = "serde_bytes"
+version = "0.11.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5d440709e79d88e51ac01c4b72fc6cb7314017bb7da9eeff678aa94c10e3ea8"
+dependencies = [
+ "serde",
+ "serde_core",
 ]
 
 [[package]]
@@ -3743,6 +3805,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tokio-util"
+version = "0.7.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "494815d09bf52b5548659851081238f0ca39ff638363907596da739561c62c52"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "futures-sink",
+ "futures-util",
+ "pin-project-lite",
+ "tokio",
+]
+
+[[package]]
 name = "toml"
 version = "1.1.4+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3900,7 +3976,7 @@ checksum = "ac7349e1f55f6b801c7c277958df4ea53e7f20f21e8014910ad888b2ecda93ea"
 dependencies = [
  "bytemuck",
  "glifo",
- "hashbrown",
+ "hashbrown 0.17.1",
  "vello_common",
 ]
 
@@ -4590,6 +4666,7 @@ dependencies = [
  "log",
  "portable-pty",
  "russh",
+ "russh-sftp",
  "serde",
  "serde_json",
  "skrifa",

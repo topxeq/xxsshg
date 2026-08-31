@@ -184,109 +184,7 @@ async fn connect_and_open(
     rows: u16,
     requests: mpsc::UnboundedSender<ConnectRequest>,
 ) -> Result<SessionHandle, ConnectError> {
-    let limit = match opts.connect_timeout {
-        Some(0) => None,
-        Some(s) => Some(Duration::from_secs(s)),
-        None => Some(Duration::from_secs(CONNECT_TIMEOUT_DEFAULT_SECS)),
-    };
-
-    let config = Arc::new(client::Config {
-        keepalive_interval: Some(KEEPALIVE_INTERVAL),
-        keepalive_max: KEEPALIVE_MAX,
-        inactivity_timeout: None,
-        nodelay: true,
-        ..Default::default()
-    });
-
-    // Transport: SOCKS5 or direct (ProxyStream logic from xxssh)
-    log::debug!("connect_and_open: begin, proxy={:?}", opts.proxy);
-    let stream: ProxyStream = match opts.proxy.as_deref() {
-        Some(url) => {
-            let p = parse_proxy_url(url).map_err(ConnectError::Proxy)?;
-            let target = (server.host.clone(), server.port);
-            let fut: std::pin::Pin<
-                Box<
-                    dyn std::future::Future<
-                            Output = Result<
-                                tokio_socks::tcp::Socks5Stream<tokio::net::TcpStream>,
-                                tokio_socks::Error,
-                            >,
-                        > + Send
-                        + 'static,
-                >,
-            > = Box::pin(socks_connect(
-                p.addr.clone(),
-                target,
-                p.username.clone(),
-                p.password.clone(),
-            ));
-            let s = match limit {
-                Some(d) => match tokio::time::timeout(d, fut).await {
-                    Ok(r) => r,
-                    Err(_) => {
-                        return Err(ConnectError::Timeout {
-                            host: server.host.clone(),
-                            secs: limit.map(|x| x.as_secs()).unwrap_or(0),
-                        })
-                    }
-                },
-                None => fut.await,
-            };
-            s.map(ProxyStream::Socks)
-                .map_err(|e| ConnectError::Proxy(e.to_string()))?
-        }
-        None => {
-            let fut = tokio::net::TcpStream::connect((server.host.as_str(), server.port));
-            let tcp = match limit {
-                Some(d) => match tokio::time::timeout(d, fut).await {
-                    Ok(r) => r,
-                    Err(_) => {
-                        return Err(ConnectError::Timeout {
-                            host: server.host.clone(),
-                            secs: limit.map(|x| x.as_secs()).unwrap_or(0),
-                        })
-                    }
-                },
-                None => fut.await,
-            };
-            match tcp {
-                Ok(tcp) => {
-                    let _ = tcp.set_nodelay(true);
-                    ProxyStream::Direct(tcp)
-                }
-                Err(e) => return Err(ConnectError::Network(e.to_string())),
-            }
-        }
-    };
-
-    let handler = Handler {
-        host: server.host.clone(),
-        port: server.port,
-        policy_strict: opts.known_hosts.clone(),
-        policy_learn: opts.known_hosts_add.clone(),
-        keystore: opts.host_keystore.clone(),
-        requests: requests.clone(),
-        approved: HashSet::new(),
-        reject_reason: None,
-    };
-
-    let handshake = client::connect_stream(config, stream, handler);
-    let mut session = match limit {
-        Some(d) => match tokio::time::timeout(d, handshake).await {
-            Ok(r) => r,
-            Err(_) => {
-                return Err(ConnectError::Timeout {
-                    host: server.host.clone(),
-                    secs: limit.map(|x| x.as_secs()).unwrap_or(0),
-                })
-            }
-        },
-        None => handshake.await,
-    }
-    .map_err(|e| ConnectError::Network(e.to_string()))?;
-
-    log::debug!("connect_and_open: handshake done, authenticating ({:?})", server.auth);
-    // Authenticate
+    let mut session = establish(server.clone(), opts, requests.clone()).await?;
     let auth = match server.auth {
         AuthMethod::Password => auth_password(&mut session, &server, &requests, lang).await,
         AuthMethod::Key => auth_key(&mut session, &server, &requests).await,
@@ -300,8 +198,16 @@ async fn connect_and_open(
             AuthErr::Failed(msg) => ConnectError::Auth(msg),
         });
     }
+    open_pty_after_auth(session, &server, cols, rows).await
+}
 
-    log::debug!("connect_and_open: auth ok, opening PTY+shell");
+/// Authenticated session -> PTY + shell + endpoints for a GUI terminal tab.
+async fn open_pty_after_auth(
+    session: client::Handle<Handler>,
+    server: &Server,
+    cols: u16,
+    rows: u16,
+) -> Result<SessionHandle, ConnectError> {
     // Open channel + PTY + shell (PTY modes copied from xxssh)
     let mut channel = session
         .channel_open_session()
@@ -425,6 +331,195 @@ async fn connect_and_open(
         close_tx,
     })
 }
+
+async fn establish(
+    mut server: Server,
+    opts: ConnectOpts,
+    requests: mpsc::UnboundedSender<ConnectRequest>,
+) -> Result<client::Handle<Handler>, ConnectError> {
+    let limit = match opts.connect_timeout {
+        Some(0) => None,
+        Some(s) => Some(Duration::from_secs(s)),
+        None => Some(Duration::from_secs(CONNECT_TIMEOUT_DEFAULT_SECS)),
+    };
+
+    let config = Arc::new(client::Config {
+        keepalive_interval: Some(KEEPALIVE_INTERVAL),
+        keepalive_max: KEEPALIVE_MAX,
+        inactivity_timeout: None,
+        nodelay: true,
+        ..Default::default()
+    });
+
+    // Transport: SOCKS5 or direct (ProxyStream logic from xxssh)
+    log::debug!("connect_and_open: begin, proxy={:?}", opts.proxy);
+    let stream: ProxyStream = match opts.proxy.as_deref() {
+        Some(url) => {
+            let p = parse_proxy_url(url).map_err(ConnectError::Proxy)?;
+            let target = (server.host.clone(), server.port);
+            let fut: std::pin::Pin<
+                Box<
+                    dyn std::future::Future<
+                            Output = Result<
+                                tokio_socks::tcp::Socks5Stream<tokio::net::TcpStream>,
+                                tokio_socks::Error,
+                            >,
+                        > + Send
+                        + 'static,
+                >,
+            > = Box::pin(socks_connect(
+                p.addr.clone(),
+                target,
+                p.username.clone(),
+                p.password.clone(),
+            ));
+            let s = match limit {
+                Some(d) => match tokio::time::timeout(d, fut).await {
+                    Ok(r) => r,
+                    Err(_) => {
+                        return Err(ConnectError::Timeout {
+                            host: server.host.clone(),
+                            secs: limit.map(|x| x.as_secs()).unwrap_or(0),
+                        })
+                    }
+                },
+                None => fut.await,
+            };
+            s.map(ProxyStream::Socks)
+                .map_err(|e| ConnectError::Proxy(e.to_string()))?
+        }
+        None => {
+            let fut = tokio::net::TcpStream::connect((server.host.as_str(), server.port));
+            let tcp = match limit {
+                Some(d) => match tokio::time::timeout(d, fut).await {
+                    Ok(r) => r,
+                    Err(_) => {
+                        return Err(ConnectError::Timeout {
+                            host: server.host.clone(),
+                            secs: limit.map(|x| x.as_secs()).unwrap_or(0),
+                        })
+                    }
+                },
+                None => fut.await,
+            };
+            match tcp {
+                Ok(tcp) => {
+                    let _ = tcp.set_nodelay(true);
+                    ProxyStream::Direct(tcp)
+                }
+                Err(e) => return Err(ConnectError::Network(e.to_string())),
+            }
+        }
+    };
+
+    let handler = Handler {
+        host: server.host.clone(),
+        port: server.port,
+        policy_strict: opts.known_hosts.clone(),
+        policy_learn: opts.known_hosts_add.clone(),
+        keystore: opts.host_keystore.clone(),
+        requests: requests.clone(),
+        approved: HashSet::new(),
+        reject_reason: None,
+    };
+
+    let handshake = client::connect_stream(config, stream, handler);
+    let mut session = match limit {
+        Some(d) => match tokio::time::timeout(d, handshake).await {
+            Ok(r) => r,
+            Err(_) => {
+                return Err(ConnectError::Timeout {
+                    host: server.host.clone(),
+                    secs: limit.map(|x| x.as_secs()).unwrap_or(0),
+                })
+            }
+        },
+        None => handshake.await,
+    }
+    .map_err(|e| ConnectError::Network(e.to_string()))?;
+
+    log::debug!("connect_and_open: handshake done, authenticating ({:?})", server.auth);
+    // Authenticate
+    let auth = match server.auth {
+        AuthMethod::Password => auth_password(&mut session, &server, &requests, Language::En).await,
+        AuthMethod::Key => auth_key(&mut session, &server, &requests).await,
+    };
+    if let Err(e) = auth {
+        let _ = session
+            .disconnect(Disconnect::ByApplication, "auth failed", "en")
+            .await;
+        return Err(match e {
+            AuthErr::Cancelled => ConnectError::Cancelled,
+            AuthErr::Failed(msg) => ConnectError::Auth(msg),
+        });
+    }
+
+    log::debug!("connect_and_open: auth ok, opening PTY+shell");
+    Ok(session)
+}
+
+/// Authenticated session -> SFTP subsystem client for the file browser.
+pub struct SftpClient {
+    pub sftp: Arc<tokio::sync::Mutex<russh_sftp::client::SftpSession>>,
+    pub close_tx: oneshot::Sender<()>,
+}
+
+pub fn spawn_sftp(
+    rt: &tokio::runtime::Handle,
+    server: Server,
+    opts: ConnectOpts,
+) -> (
+    oneshot::Receiver<Result<SftpClient, ConnectError>>,
+    mpsc::UnboundedReceiver<ConnectRequest>,
+) {
+    let (result_tx, result_rx) = oneshot::channel();
+    let (req_tx, req_rx) = mpsc::unbounded_channel();
+    rt.spawn(async move {
+        let res = async {
+            let mut session = establish(server.clone(), opts, req_tx.clone()).await?;
+            let auth = match server.auth {
+                AuthMethod::Password => {
+                    auth_password(&mut session, &server, &req_tx, Language::En).await
+                }
+                AuthMethod::Key => auth_key(&mut session, &server, &req_tx).await,
+            };
+            if let Err(e) = auth {
+                let _ = session
+                    .disconnect(Disconnect::ByApplication, "auth failed", "en")
+                    .await;
+                return Err(match e {
+                    AuthErr::Cancelled => ConnectError::Cancelled,
+                    AuthErr::Failed(msg) => ConnectError::Auth(msg),
+                });
+            }
+            let channel = session
+                .channel_open_session()
+                .await
+                .map_err(|e| ConnectError::Other(e.to_string()))?;
+            channel
+                .request_subsystem(true, "sftp")
+                .await
+                .map_err(|e| ConnectError::Other(e.to_string()))?;
+            let sftp = russh_sftp::client::SftpSession::new(channel.into_stream())
+                .await
+                .map_err(|e| ConnectError::Other(e.to_string()))?;
+            let (close_tx, close_rx) = oneshot::channel::<()>();
+            tokio::spawn(async move {
+                let _ = close_rx.await;
+                let _ = session
+                    .disconnect(Disconnect::ByApplication, "sftp closed", "en")
+                    .await;
+            });
+            Ok(SftpClient {
+                sftp: Arc::new(tokio::sync::Mutex::new(sftp)),
+                close_tx,
+            })
+        };
+        let _ = result_tx.send(res.await);
+    });
+    (result_rx, req_rx)
+}
+
 
 // ---------------------------------------------------------------------------
 // Auth (logic copied from xxssh; prompts routed to the GUI)

@@ -1,0 +1,85 @@
+
+    /// confirm / prompt windows for SFTP ops
+    pub fn confirm_ui(&mut self, ui: &mut egui::Ui) {
+        let Some((kind, target)) = self.confirm.clone() else { return };
+        let lang = self.lang;
+        let (title, prompt, with_input) = match kind {
+            ConfirmKind::RemoteDelete => (
+                tpl(tr(lang, "sftp_delete"), &[]),
+                tpl(tr(lang, "sftp_confirm_delete"), &[("name", &target)]),
+                false,
+            ),
+            ConfirmKind::RemoteDeleteDir => (
+                tpl(tr(lang, "sftp_delete"), &[]),
+                tpl(tr(lang, "sftp_confirm_delete_dir"), &[("name", &target)]),
+                false,
+            ),
+            ConfirmKind::LocalDelete => (
+                tpl(tr(lang, "sftp_delete"), &[]),
+                tpl(tr(lang, "sftp_confirm_delete"), &[("name", &target)]),
+                false,
+            ),
+            ConfirmKind::LocalDeleteDir => (
+                tpl(tr(lang, "sftp_delete"), &[]),
+                tpl(tr(lang, "sftp_confirm_delete_dir"), &[("name", &target)]),
+                false,
+            ),
+            ConfirmKind::RemoteRename => (
+                tpl(tr(lang, "sftp_rename"), &[]),
+                tpl(tr(lang, "sftp_new_name"), &[]),
+                true,
+            ),
+            ConfirmKind::RemoteMkdir => (
+                tpl(tr(lang, "sftp_new_dir"), &[]),
+                tpl(tr(lang, "sftp_new_name"), &[]),
+                true,
+            ),
+        };
+        let mut open = true;
+        let mut ok = false;
+        let mut cancel = false;
+        egui::Window::new(title)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ui, |ui| {
+                ui.label(prompt);
+                if with_input {
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut self.confirm_input).desired_width(260.0),
+                    );
+                    if self.confirm_input.is_empty() && !self.confirm_input_focus_done {
+                        r.request_focus();
+                        self.confirm_input_focus_done = true;
+                    }
+                }
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui.button(tr(lang, "btn_ok")).clicked() {
+                        ok = true;
+                    }
+                    if ui.button(tr(lang, "btn_cancel")).clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+        if cancel || !open {
+            self.confirm = None;
+        } else if ok {
+            let name = target.clone();
+            let input = self.confirm_input.clone();
+            let kind = kind;
+            self.confirm = None;
+            self.confirm_input_focus_done = false;
+            match kind {
+                ConfirmKind::RemoteDelete => self.op_delete_remote(name, false),
+                ConfirmKind::RemoteDeleteDir => self.op_delete_remote(name, true),
+                ConfirmKind::LocalDelete => self.op_delete_local(name, false),
+                ConfirmKind::LocalDeleteDir => self.op_delete_local(name, true),
+                ConfirmKind::RemoteRename => self.op_rename_remote(name, input),
+                ConfirmKind::RemoteMkdir => self.op_mkdir_remote(input),
+            }
+        }
+    }
+}
