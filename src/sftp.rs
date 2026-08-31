@@ -254,3 +254,16 @@ pub async fn list_dir_shared(
     let g = sftp.lock().await;
     list_dir(&g, path).await
 }
+
+/// Human-readable size (used by the SFTP browser UI)
+pub fn fmt_size_pub(n: u64) -> String {
+    if n >= 1 << 30 {
+        format!("{:.1} GB", n as f32 / (1 << 30) as f32)
+    } else if n >= 1 << 20 {
+        format!("{:.1} MB", n as f32 / (1 << 20) as f32)
+    } else if n >= 1 << 10 {
+        format!("{:.1} KB", n as f32 / (1 << 10) as f32)
+    } else {
+        format!("{n} B")
+    }
+}

@@ -415,6 +415,7 @@ impl SftpTab {
 
 
     /// Render the dual-pane browser + transfers
+    /// Render the SFTP browser: remote pane (right panel) + local pane (center)
     pub fn ui(&mut self, ui: &mut egui::Ui) {
         if let Some(err) = &self.error.clone() {
             ui.horizontal(|ui| {
@@ -431,158 +432,77 @@ impl SftpTab {
             });
         }
 
-        // ---- remote toolbar ----
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(tpl(tr(self.lang, "sftp_remote"), &[])).strong());
-            let r_go = ui.add(
-                egui::TextEdit::singleline(&mut self.remote_edit).desired_width(240.0),
-            );
-            let enter = r_go.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if ui.button(tpl(tr(self.lang, "sftp_go"), &[])).clicked() || enter {
-                let d = self.remote_edit.clone();
-                self.spawn_refresh_remote(Some(&d), false);
-            }
-            if ui.button(tpl(tr(self.lang, "sftp_up"), &[])).clicked() {
-                let up = sftp::join_remote(&self.remote_dir, "..");
-                self.spawn_refresh_remote(Some(&up), true);
-            }
-            if ui.button(tpl(tr(self.lang, "sftp_refresh"), &[])).clicked() {
-                self.spawn_refresh_remote(None, false);
-            }
-        });
-
-        // ---- local toolbar ----
-        ui.horizontal(|ui| {
-            ui.label(egui::RichText::new(tpl(tr(self.lang, "sftp_local"), &[])).strong());
-            let r_go = ui.add(
-                egui::TextEdit::singleline(&mut self.local_edit).desired_width(240.0),
-            );
-            let enter = r_go.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-            if ui.button(tpl(tr(self.lang, "sftp_go"), &[])).clicked() || enter {
-                let d = PathBuf::from(self.local_edit.trim());
-                if d.is_dir() {
-                    self.local_dir = d.clone();
-                    self.refresh_local();
-                } else {
-                    self.error = Some(d.to_string_lossy().into_owned());
-                }
-            }
-            if ui.button(tpl(tr(self.lang, "sftp_up"), &[])).clicked() {
-                if let Some(p) = self.local_dir.parent() {
-                    self.local_dir = p.to_path_buf();
-                    self.refresh_local();
-                }
-            }
-            if ui.button(tpl(tr(self.lang, "sftp_refresh"), &[])).clicked() {
-                self.refresh_local();
-            }
-        });
-
-        ui.add_space(2.0);
-
-        // ---- transfer buttons row ----
-        ui.horizontal(|ui| {
-            let dl = ui.add_enabled(
-                self.remote_sel.is_some(),
-                egui::Button::new(tpl(tr(self.lang, "sftp_download"), &[])),
-            );
-            if dl.clicked() {
-                self.download_selected();
-            }
-            let ul = ui.add_enabled(
-                self.local_sel.is_some(),
-                egui::Button::new(tpl(tr(self.lang, "sftp_upload"), &[])),
-            );
-            if ul.clicked() {
-                self.upload_selected();
-            }
-            ui.separator();
-            let mk = ui.button(tpl(tr(self.lang, "sftp_new_dir"), &[]));
-            if mk.clicked() {
-                self.confirm_input = String::new();
-                self.confirm = Some((ConfirmKind::RemoteMkdir, String::new()));
-            }
-            let rn = ui.add_enabled(
-                self.remote_sel.is_some(),
-                egui::Button::new(tpl(tr(self.lang, "sftp_rename"), &[])),
-            );
-            if rn.clicked() {
-                if let Some(i) = self.remote_sel {
-                    if let Some(e) = self.remote_entries.get(i) {
-                        self.confirm_input = e.name.clone();
-                        self.confirm = Some((ConfirmKind::RemoteRename, e.name.clone()));
+        // Remote pane on the right: a real panel so both panes always fit
+        egui::Panel::right(egui::Id::new("sftp_remote_pane"))
+            .resizable(false)
+            .show_inside(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(tpl(tr(self.lang, "sftp_remote"), &[])).strong());
+                    let r_go = ui.add(
+                        egui::TextEdit::singleline(&mut self.remote_edit).desired_width(160.0),
+                    );
+                    let enter = r_go.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    if ui.button(tpl(tr(self.lang, "sftp_go"), &[])).clicked() || enter {
+                        let d = self.remote_edit.clone();
+                        self.spawn_refresh_remote(Some(&d), false);
                     }
-                }
-            }
-            let del = ui.add_enabled(
-                self.remote_sel.is_some() || self.local_sel.is_some(),
-                egui::Button::new(egui::RichText::new(tpl(tr(self.lang, "sftp_delete"), &[])).color(egui::Color32::LIGHT_RED)),
-            );
-            if del.clicked() {
-                if let Some(i) = self.remote_sel {
-                    if let Some(e) = self.remote_entries.get(i) {
-                        self.confirm = Some((
-                            if e.is_dir { ConfirmKind::RemoteDeleteDir } else { ConfirmKind::RemoteDelete },
-                            e.name.clone(),
-                        ));
+                    if ui.button(tpl(tr(self.lang, "sftp_up"), &[])).clicked() {
+                        let up = sftp::join_remote(&self.remote_dir, "..");
+                        self.spawn_refresh_remote(Some(&up), true);
                     }
-                } else if let Some(i) = self.local_sel {
-                    if let Some(e) = self.local_entries.get(i) {
-                        self.confirm = Some((
-                            if e.is_dir { ConfirmKind::LocalDeleteDir } else { ConfirmKind::LocalDelete },
-                            e.name.clone(),
-                        ));
+                    if ui.button(tpl(tr(self.lang, "sftp_refresh"), &[])).clicked() {
+                        self.spawn_refresh_remote(None, false);
                     }
-                }
-            }
-        });
+                });
+                ui.separator();
 
-
-        // ---- dual panes (fixed widths so both are always visible) ----
-        let pane_w = (ui.available_width() - 16.0) / 2.0;
-        let pane_h = (ui.available_height() - 8.0).max(120.0);
-        ui.horizontal(|ui| {
-            // local pane
-            ui.allocate_ui(egui::vec2(pane_w, pane_h), |ui| {
-                ui.set_min_width(pane_w);
-                ui.label(egui::RichText::new(self.local_dir.to_string_lossy().as_ref()).weak().small());
-                egui::ScrollArea::vertical()
-                    .id_salt("sftp_local_list")
-                    .show(ui, |ui| {
-                        for (i, e) in self.local_entries.clone().iter().enumerate() {
-                            let label = if e.is_dir {
-                                egui::RichText::new(format!("{}{}", e.name, "/")).strong()
-                            } else {
-                                egui::RichText::new(format!("{}  ({})", e.name, fmt_size(e.size))).weak()
-                            };
-                            let resp = ui.selectable_label(self.local_sel == Some(i), label);
-                            if resp.clicked() {
-                                self.local_sel = Some(i);
-                            }
-                            if resp.double_clicked() && e.is_dir {
-                                self.local_dir = self.local_dir.join(&e.name);
-                                self.refresh_local();
-                                self.local_sel = None;
+                // remote ops
+                ui.horizontal(|ui| {
+                    if ui.button(tpl(tr(self.lang, "sftp_new_dir"), &[])).clicked() {
+                        self.confirm_input = String::new();
+                        self.confirm = Some((ConfirmKind::RemoteMkdir, String::new()));
+                    }
+                    let rn = ui.add_enabled(
+                        self.remote_sel.is_some(),
+                        egui::Button::new(tpl(tr(self.lang, "sftp_rename"), &[])),
+                    );
+                    if rn.clicked() {
+                        if let Some(i) = self.remote_sel {
+                            if let Some(e) = self.remote_entries.get(i) {
+                                self.confirm_input = e.name.clone();
+                                self.confirm = Some((ConfirmKind::RemoteRename, e.name.clone()));
                             }
                         }
-                    });
-            });
-            ui.separator();
-            // remote pane
-            ui.allocate_ui(egui::vec2(pane_w, pane_h), |ui| {
-                ui.set_min_width(pane_w);
-                if self.loading {
-                    ui.horizontal(|ui| { ui.spinner(); ui.label("..."); });
-                }
-                ui.label(egui::RichText::new(self.remote_dir.as_str()).weak().small());
+                    }
+                    let del = ui.add_enabled(
+                        self.remote_sel.is_some(),
+                        egui::Button::new(egui::RichText::new(tpl(tr(self.lang, "sftp_delete"), &[])).color(egui::Color32::LIGHT_RED)),
+                    );
+                    if del.clicked() {
+                        if let Some(i) = self.remote_sel {
+                            if let Some(e) = self.remote_entries.get(i) {
+                                self.confirm = Some((
+                                    if e.is_dir { ConfirmKind::RemoteDeleteDir } else { ConfirmKind::RemoteDelete },
+                                    e.name.clone(),
+                                ));
+                            }
+                        }
+                    }
+                    if self.loading {
+                        ui.spinner();
+                    }
+                });
+                ui.separator();
+
                 egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
                     .id_salt("sftp_remote_list")
                     .show(ui, |ui| {
                         for (i, e) in self.remote_entries.clone().iter().enumerate() {
                             let label = if e.is_dir {
                                 egui::RichText::new(format!("{}{}", e.name, "/")).strong()
                             } else {
-                                egui::RichText::new(format!("{}  ({})", e.name, fmt_size(e.size))).weak()
+                                egui::RichText::new(format!("{}  ({})", e.name, crate::sftp::fmt_size_pub(e.size))).weak()
                             };
                             let resp = ui.selectable_label(self.remote_sel == Some(i), label);
                             if resp.clicked() {
@@ -596,57 +516,132 @@ impl SftpTab {
                         }
                     });
             });
-        });
 
-        // ---- transfers ----
-        if !self.transfers.is_empty() {
-            ui.separator();
+        // Local pane + transfers in the center
+        egui::CentralPanel::default_margins().show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(egui::RichText::new(tpl(tr(self.lang, "sftp_transfers"), &[])).strong());
-                if ui.small_button(tpl(tr(self.lang, "sftp_clear"), &[])).clicked() {
-                    self.transfers.retain(|t| !t.finished);
+                ui.label(egui::RichText::new(tpl(tr(self.lang, "sftp_local"), &[])).strong());
+                let r_go = ui.add(
+                    egui::TextEdit::singleline(&mut self.local_edit).desired_width(200.0),
+                );
+                let enter = r_go.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if ui.button(tpl(tr(self.lang, "sftp_go"), &[])).clicked() || enter {
+                    let d = PathBuf::from(self.local_edit.trim());
+                    if d.is_dir() {
+                        self.local_dir = d.clone();
+                        self.refresh_local();
+                    } else {
+                        self.error = Some(d.to_string_lossy().into_owned());
+                    }
+                }
+                if ui.button(tpl(tr(self.lang, "sftp_up"), &[])).clicked() {
+                    if let Some(p) = self.local_dir.parent() {
+                        self.local_dir = p.to_path_buf();
+                        self.refresh_local();
+                    }
+                }
+                if ui.button(tpl(tr(self.lang, "sftp_refresh"), &[])).clicked() {
+                    self.refresh_local();
                 }
             });
+            ui.separator();
+
+            // transfer buttons
+            ui.horizontal(|ui| {
+                let dl = ui.add_enabled(
+                    self.remote_sel.is_some(),
+                    egui::Button::new(tpl(tr(self.lang, "sftp_download"), &[])),
+                );
+                if dl.clicked() {
+                    self.download_selected();
+                }
+                let ul = ui.add_enabled(
+                    self.local_sel.is_some(),
+                    egui::Button::new(tpl(tr(self.lang, "sftp_upload"), &[])),
+                );
+                if ul.clicked() {
+                    self.upload_selected();
+                }
+            });
+            ui.separator();
+
+            ui.label(egui::RichText::new(self.local_dir.to_string_lossy().as_ref()).weak().small());
             egui::ScrollArea::vertical()
-                .max_height(96.0)
-                .id_salt("sftp_transfers")
+                .auto_shrink([false, false])
+                .id_salt("sftp_local_list")
                 .show(ui, |ui| {
-                    for t in &self.transfers {
-                        ui.horizontal(|ui| {
-                            let icon = if t.err.is_some() {
-                                "⚠"
-                            } else {
-                                match t.kind {
-                                    TransferKind::Upload => "⬆",
-                                    TransferKind::Download => "⬇",
-                                }
-                            };
-                            ui.label(egui::RichText::new(icon).color(if t.err.is_some() {
-                                egui::Color32::LIGHT_RED
-                            } else {
-                                egui::Color32::LIGHT_GREEN
-                            }));
-                            let frac = if t.total > 0 { t.done as f32 / t.total as f32 } else { 1.0 };
-                            ui.add(
-                                egui::ProgressBar::new(frac.clamp(0.0, 1.0))
-                                    .show_percentage()
-                                    .desired_height(14.0),
-                            );
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "{} {}/{}",
-                                    t.name,
-                                    fmt_size(t.done),
-                                    fmt_size(t.total)
-                                ))
-                                .weak()
-                                .small(),
-                            );
-                        });
+                    for (i, e) in self.local_entries.clone().iter().enumerate() {
+                        let label = if e.is_dir {
+                            egui::RichText::new(format!("{}{}", e.name, "/")).strong()
+                        } else {
+                            egui::RichText::new(format!("{}  ({})", e.name, crate::sftp::fmt_size_pub(e.size))).weak()
+                        };
+                        let resp = ui.selectable_label(self.local_sel == Some(i), label);
+                        if resp.clicked() {
+                            self.local_sel = Some(i);
+                        }
+                        if resp.double_clicked() && e.is_dir {
+                            self.local_dir = self.local_dir.join(&e.name);
+                            self.refresh_local();
+                            self.local_sel = None;
+                        }
                     }
                 });
-        }
+
+            // transfers
+            if !self.transfers.is_empty() {
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(tpl(tr(self.lang, "sftp_transfers"), &[])).strong());
+                    if ui.small_button(tpl(tr(self.lang, "sftp_clear"), &[])).clicked() {
+                        self.transfers.retain(|t| !t.finished);
+                    }
+                });
+                egui::ScrollArea::vertical()
+                    .max_height(96.0)
+                    .id_salt("sftp_transfers")
+                    .show(ui, |ui| {
+                        for t in &self.transfers {
+                            ui.horizontal(|ui| {
+                                let icon = if t.err.is_some() {
+                                    "⚠"
+                                } else {
+                                    match t.kind {
+                                        TransferKind::Upload => "⬆",
+                                        TransferKind::Download => "⬇",
+                                    }
+                                };
+                                ui.label(egui::RichText::new(icon).color(if t.err.is_some() {
+                                    egui::Color32::LIGHT_RED
+                                } else {
+                                    egui::Color32::LIGHT_GREEN
+                                }));
+                                let frac = if t.total > 0 { t.done as f32 / t.total as f32 } else { 1.0 };
+                                ui.add(
+                                    egui::ProgressBar::new(frac.clamp(0.0, 1.0))
+                                        .show_percentage()
+                                        .desired_height(14.0),
+                                );
+                                ui.label(
+                                    egui::RichText::new(format!(
+                                        "{} {}/{}",
+                                        t.name,
+                                        crate::sftp::fmt_size_pub(t.done),
+                                        crate::sftp::fmt_size_pub(t.total)
+                                    ))
+                                    .weak()
+                                    .small(),
+                                );
+                            });
+                        }
+                    });
+            }
+        });
+
+        // confirm / prompt windows
+        self.confirm_ui(ui);
     }
+
 
 
 
@@ -735,14 +730,3 @@ impl SftpTab {
     }
 }
 
-pub fn fmt_size(n: u64) -> String {
-    if n >= 1 << 30 {
-        format!("{:.1} GB", n as f32 / (1 << 30) as f32)
-    } else if n >= 1 << 20 {
-        format!("{:.1} MB", n as f32 / (1 << 20) as f32)
-    } else if n >= 1 << 10 {
-        format!("{:.1} KB", n as f32 / (1 << 10) as f32)
-    } else {
-        format!("{n} B")
-    }
-}
