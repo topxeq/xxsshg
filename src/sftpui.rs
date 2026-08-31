@@ -27,7 +27,6 @@ pub struct Transfer {
 pub enum OpMsg {
     RemoteList { dir: String, entries: Vec<FileEntry> },
     Error(String),
-    TransferProgress { id: u64, done: u64, total: u64 },
     TransferDone { id: u64, err: Option<String>, refresh_remote: bool, refresh_local: bool },
     RemoteDirSet(String),
 }
@@ -182,6 +181,19 @@ impl SftpTab {
     pub fn poll(&mut self) -> (bool, bool) {
         let mut refresh_remote = false;
         let mut refresh_local = false;
+        // drain transfer progress ticks
+        while let Ok((id, done, total, err)) = self.prog_rx.try_recv() {
+            if let Some(t) = self.transfers.iter_mut().find(|t| t.id == id) {
+                t.done = done;
+                if total != u64::MAX {
+                    t.total = total;
+                }
+                if let Some(e) = err {
+                    t.err = Some(e);
+                    t.finished = true;
+                }
+            }
+        }
         while let Ok(msg) = self.op_rx.try_recv() {
             match msg {
                 OpMsg::RemoteList { dir, entries } => {
@@ -199,12 +211,6 @@ impl SftpTab {
                 OpMsg::RemoteDirSet(d) => {
                     self.remote_edit = d.clone();
                     self.remote_dir = d;
-                }
-                OpMsg::TransferProgress { id, done, total } => {
-                    if let Some(t) = self.transfers.iter_mut().find(|t| t.id == id) {
-                        t.done = done;
-                        t.total = total;
-                    }
                 }
                 OpMsg::TransferDone { id, err, refresh_remote: rr, refresh_local: rl } => {
                     if let Some(t) = self.transfers.iter_mut().find(|t| t.id == id) {
@@ -240,12 +246,6 @@ impl SftpTab {
         id
     }
 
-    fn progress_cb(&self, id: u64) -> impl Fn(u64) + Send + Sync + 'static {
-        let tx = self.prog_tx.clone();
-        move |done: u64| {
-            let _ = tx.send((id, done, u64::MAX, None));
-        }
-    }
 
 
     /// Upload selected local file/dir into the current remote dir
