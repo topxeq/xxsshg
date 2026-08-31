@@ -511,7 +511,11 @@ impl XxsshgApp {
                         self.quick = Some(QuickForm::from_gcfg(&self.gcfg));
                         self.quick_open = true;
                     }
-                    ui.menu_button("☰", |ui| {
+                    // 0.36: MenuButton renders its own button — size it via
+                    // Button::min_size so it matches the lightning button
+                    let menu_btn = egui::Button::new("☰")
+                        .min_size(egui::vec2(small_w, 26.0));
+                    egui::containers::menu::MenuButton::from_button(menu_btn).ui(ui, |ui| {
                         if ui.button(tpl(tr(lang, "settings_title"), &[])).clicked() {
                             self.settings_open = true;
                             ui.close();
