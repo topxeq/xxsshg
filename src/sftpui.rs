@@ -486,6 +486,13 @@ impl SftpTab {
                                     e.name.clone(),
                                 ));
                             }
+                        } else if let Some(i) = self.local_sel {
+                            if let Some(e) = self.local_entries.get(i) {
+                                self.confirm = Some((
+                                    if e.is_dir { ConfirmKind::LocalDeleteDir } else { ConfirmKind::LocalDelete },
+                                    e.name.clone(),
+                                ));
+                            }
                         }
                     }
                     if self.loading {
