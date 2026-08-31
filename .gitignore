@@ -2,3 +2,7 @@ target/
 target/
 pty-*.bin
 *.log
+target/
+pty-*.bin
+*.log
+tmp/
