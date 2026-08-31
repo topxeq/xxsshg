@@ -228,6 +228,9 @@ pub struct XxsshgApp {
     quit_confirm: bool,
     status_msg: Option<(String, std::time::Instant)>,
     autoconnect_done: bool,
+    /// Tab close / new-cmd requested by a terminal hotkey (handled next frame)
+    deferred_close: Option<usize>,
+    deferred_new_cmd: bool,
 }
 
 impl XxsshgApp {
@@ -264,6 +267,8 @@ impl XxsshgApp {
             quit_confirm: false,
             status_msg: None,
             autoconnect_done: false,
+            deferred_close: None,
+            deferred_new_cmd: false,
         }
     }
 
@@ -669,7 +674,17 @@ impl XxsshgApp {
                     });
                     return;
                 }
+                term.hotkey_close = crate::gconfig::parse_hotkey(&self.gcfg.hotkey_close_tab);
+                term.hotkey_new = crate::gconfig::parse_hotkey(&self.gcfg.hotkey_new_cmd);
                 let resized = term.paint(ui, self.gcfg.font_size, self.gcfg.copy_on_select, self.gcfg.invert_scrolling);
+                let close_requested = std::mem::take(&mut term.pending_close_tab);
+                let new_cmd_requested = std::mem::take(&mut term.pending_new_cmd);
+                if close_requested {
+                    self.deferred_close = Some(self.active_tab);
+                }
+                if new_cmd_requested {
+                    self.deferred_new_cmd = true;
+                }
                 if let Some(zoom) = term.pending_zoom.take() {
                     if zoom.is_nan() {
                         self.gcfg.font_size = 14.0;
@@ -994,6 +1009,18 @@ impl XxsshgApp {
                             ui.label(tr(lang, "s_invert_scroll"));
                             ui.checkbox(&mut self.gcfg.invert_scrolling, "");
                             ui.end_row();
+                            ui.label(tr(lang, "hk_close_tab"));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.gcfg.hotkey_close_tab)
+                                    .hint_text("Ctrl+W"),
+                            );
+                            ui.end_row();
+                            ui.label(tr(lang, "hk_new_cmd"));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.gcfg.hotkey_new_cmd)
+                                    .hint_text("Ctrl+N"),
+                            );
+                            ui.end_row();
                             ui.label(tr(lang, "s_font"));
                             egui::ComboBox::from_id_salt("font_cb")
                                 .selected_text(if self.gcfg.font_family.is_empty() {
@@ -1020,6 +1047,17 @@ impl XxsshgApp {
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
                         if ui.button(tr(lang, "btn_save")).clicked() {
+                            let checks = vec![
+                                (tr(lang, "hk_close_tab"), self.gcfg.hotkey_close_tab.clone()),
+                                (tr(lang, "hk_new_cmd"), self.gcfg.hotkey_new_cmd.clone()),
+                            ];
+                            for (label, val) in &checks {
+                                if !val.trim().is_empty()
+                                    && crate::gconfig::parse_hotkey(val).is_none()
+                                {
+                                    self.toast(format!("{label}: {val} ?"));
+                                }
+                            }
                             if let Err(e) = crate::gconfig::save(&self.gui_path, &self.gcfg) {
                                 self.toast(format!("save failed: {e}"));
                             }
@@ -1221,6 +1259,16 @@ impl XxsshgApp {
 impl eframe::App for XxsshgApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+
+        // Hotkey-initiated tab actions (deferred by the terminal widget)
+        if let Some(i) = self.deferred_close.take() {
+            let name = self.tabs.get(i).map(|t| t.name().to_string()).unwrap_or_default();
+            self.close_tab(i);
+            self.toast(format!("{name} ✕"));
+        }
+        if self.deferred_new_cmd {
+            self.open_local_shell(ShellKind::Cmd);
+        }
 
         // Headless test hook: XXSSHG_AUTOCONNECT=<server name> connects on startup
         if !self.autoconnect_done {

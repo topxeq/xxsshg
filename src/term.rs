@@ -141,6 +141,15 @@ pub struct Terminal {
     preedit: String,
     /// Ctrl+= / Ctrl+- pressed (zoom direction); consumed by the app after paint
     pub pending_zoom: Option<f32>,
+    /// Configured hotkeys: (ctrl, shift, alt, key); matching input is NOT sent
+    /// to the PTY — the app layer performs the action (close tab / new cmd)
+    pub hotkey_close: Option<(bool, bool, bool, egui::Key)>,
+    pub hotkey_new: Option<(bool, bool, bool, egui::Key)>,
+    /// One-shot actions for the app layer (close tab / open new cmd tab)
+    pub pending_close_tab: bool,
+    pub pending_new_cmd: bool,
+    /// Scrollbar thumb drag: grab offset within the thumb (px)
+    scroll_drag: Option<f32>,
 }
 
 impl Terminal {
@@ -176,6 +185,11 @@ impl Terminal {
                 composing: false,
                 preedit: String::new(),
                 pending_zoom: None,
+                hotkey_close: None,
+                hotkey_new: None,
+                pending_close_tab: false,
+                pending_new_cmd: false,
+                scroll_drag: None,
             },
             title_rx,
             bell_rx,
@@ -398,6 +412,62 @@ impl Terminal {
             }
         }
 
+        // Vertical scrollbar over the scrollback (drawn only when history exists)
+        let mut scroll_target: Option<usize> = None;
+        let total_lines = grid.total_lines();
+        if total_lines > self.rows as usize {
+            let track_w = 7.0;
+            let track_min = egui::pos2(rect.max.x - track_w - 1.0, origin.y);
+            let track_h = (self.rows as f32) * cell_h;
+            let track = egui::Rect::from_min_size(track_min, egui::vec2(track_w, track_h));
+            let max_off = (total_lines - self.rows as usize) as f32;
+
+            let thumb_h = (track_h * (self.rows as f32 / total_lines as f32)).max(28.0);
+            let t = if max_off > 0.0 { offset as f32 / max_off } else { 0.0 };
+            let thumb_y = track.min.y + (track_h - thumb_h) * t;
+            let thumb_rect =
+                egui::Rect::from_min_size(egui::pos2(track.min.x, thumb_y), egui::vec2(track_w, thumb_h));
+
+            let resp = ui.interact(
+                track,
+                egui::Id::new("term_scrollbar"),
+                egui::Sense::click() | egui::Sense::drag(),
+            );
+            let hovered = resp.hovered() || resp.dragged();
+            let thumb_color = if self.scroll_drag.is_some() {
+                egui::Color32::from_rgba_unmultiplied(200, 200, 200, 150)
+            } else if hovered {
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 70)
+            } else {
+                egui::Color32::from_rgba_unmultiplied(255, 255, 255, 40)
+            };
+
+            if resp.drag_started() {
+                if let Some(pos) = resp.interact_pointer_pos() {
+                    if thumb_rect.contains(pos) {
+                        self.scroll_drag = Some(pos.y - thumb_y);
+                    } else {
+                        // click on track: jump so the thumb centers on the click
+                        let ty = (pos.y - track.min.y - thumb_h / 2.0)
+                            / (track_h - thumb_h).max(1.0);
+                        let target = (ty.clamp(0.0, 1.0) * max_off).round() as usize;
+                        scroll_target = Some(target);
+                        self.scroll_drag = Some(0.0);
+                    }
+                }
+            } else if resp.dragged() {
+                if let (Some(grab), Some(pos)) = (self.scroll_drag, resp.interact_pointer_pos()) {
+                    let ty = (pos.y - track.min.y - grab) / (track_h - thumb_h).max(1.0);
+                    scroll_target = Some((ty.clamp(0.0, 1.0) * max_off).round() as usize);
+                }
+            } else if self.scroll_drag.is_some() && !resp.dragged() {
+                self.scroll_drag = None;
+            }
+
+            painter.rect_filled(track, 3.0, egui::Color32::from_rgba_unmultiplied(255, 255, 255, 12));
+            painter.rect_filled(thumb_rect, 3.0, thumb_color);
+        }
+
         // IME composition rendered inline at the cursor (like a real terminal):
         // the pinyin is buffer-local — it only reaches the remote on commit.
         if !self.preedit.is_empty() && offset == 0 {
@@ -532,6 +602,14 @@ impl Terminal {
             }
         }
 
+        // Apply scrollbar-driven scroll after the grid borrow ends
+        if let Some(target) = scroll_target {
+            let delta = target as isize - offset as isize;
+            if delta != 0 {
+                self.term.scroll_display(Scroll::Delta(delta as i32));
+            }
+        }
+
         // IME: enable composition while the terminal has focus, and park the
         // composition window at the terminal cursor position.
         let focused = response.has_focus();
@@ -639,6 +717,33 @@ impl Terminal {
                                 }
                                 egui::Key::Num0 => {
                                     self.pending_zoom = Some(f32::NAN); // NaN = reset
+                                    continue;
+                                }
+                                _ => {}
+                            }
+                        }
+                        // Configured app hotkeys: swallow (app layer performs them)
+                        let m = (modifiers.ctrl, modifiers.shift, modifiers.alt, key);
+                        if self.hotkey_close == Some(m) {
+                            self.pending_close_tab = true;
+                            continue;
+                        }
+                        if self.hotkey_new == Some(m) {
+                            self.pending_new_cmd = true;
+                            continue;
+                        }
+                        // Home/End scroll the local buffer to head/tail (user
+                        // request); Shift+Home/End still reach the remote for
+                        // readline line-editing. In alt-screen (vim/less) both
+                        // go to the remote.
+                        if !modifiers.any() && !mode.contains(TermMode::ALT_SCREEN) {
+                            match key {
+                                egui::Key::Home => {
+                                    self.term.scroll_display(Scroll::Top);
+                                    continue;
+                                }
+                                egui::Key::End => {
+                                    self.term.scroll_display(Scroll::Bottom);
                                     continue;
                                 }
                                 _ => {}

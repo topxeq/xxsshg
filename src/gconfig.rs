@@ -87,6 +87,12 @@ pub struct GuiConfig {
     /// wheel up scrolls back into history)
     #[serde(default)]
     pub invert_scrolling: bool,
+    /// Hotkey to close the active tab (format "Ctrl+W"); empty = disabled
+    #[serde(default = "default_hk_close")]
+    pub hotkey_close_tab: String,
+    /// Hotkey to open a new local CMD tab (format "Ctrl+N"); empty = disabled
+    #[serde(default = "default_hk_new_cmd")]
+    pub hotkey_new_cmd: String,
     /// Last Quick Connect values (password is never persisted)
     #[serde(default)]
     pub quick_host: String,
@@ -98,6 +104,91 @@ pub struct GuiConfig {
 
 fn default_port_qc() -> u16 {
     22
+}
+fn default_hk_close() -> String {
+    "Ctrl+W".into()
+}
+fn default_hk_new_cmd() -> String {
+    "Ctrl+N".into()
+}
+
+/// Parse a hotkey string like "Ctrl+Shift+W" into (ctrl, shift, alt, egui key).
+/// Returns None when unparseable (the hotkey is then disabled).
+pub fn parse_hotkey(s: &str) -> Option<(bool, bool, bool, egui::Key)> {
+    use egui::Key;
+    let mut ctrl = false;
+    let mut shift = false;
+    let mut alt = false;
+    let mut key: Option<Key> = None;
+    for part in s.split('+') {
+        match part.trim().to_lowercase().as_str() {
+            "" => {}
+            "ctrl" | "control" => ctrl = true,
+            "shift" => shift = true,
+            "alt" | "opt" | "option" => alt = true,
+            "a" => key = Some(Key::A),
+            "b" => key = Some(Key::B),
+            "c" => key = Some(Key::C),
+            "d" => key = Some(Key::D),
+            "e" => key = Some(Key::E),
+            "f" => key = Some(Key::F),
+            "g" => key = Some(Key::G),
+            "h" => key = Some(Key::H),
+            "i" => key = Some(Key::I),
+            "j" => key = Some(Key::J),
+            "k" => key = Some(Key::K),
+            "l" => key = Some(Key::L),
+            "m" => key = Some(Key::M),
+            "n" => key = Some(Key::N),
+            "o" => key = Some(Key::O),
+            "p" => key = Some(Key::P),
+            "q" => key = Some(Key::Q),
+            "r" => key = Some(Key::R),
+            "s" => key = Some(Key::S),
+            "t" => key = Some(Key::T),
+            "u" => key = Some(Key::U),
+            "v" => key = Some(Key::V),
+            "w" => key = Some(Key::W),
+            "x" => key = Some(Key::X),
+            "y" => key = Some(Key::Y),
+            "z" => key = Some(Key::Z),
+            "0" => key = Some(Key::Num0),
+            "1" => key = Some(Key::Num1),
+            "2" => key = Some(Key::Num2),
+            "3" => key = Some(Key::Num3),
+            "4" => key = Some(Key::Num4),
+            "5" => key = Some(Key::Num5),
+            "6" => key = Some(Key::Num6),
+            "7" => key = Some(Key::Num7),
+            "8" => key = Some(Key::Num8),
+            "9" => key = Some(Key::Num9),
+            "f1" => key = Some(Key::F1),
+            "f2" => key = Some(Key::F2),
+            "f3" => key = Some(Key::F3),
+            "f4" => key = Some(Key::F4),
+            "f5" => key = Some(Key::F5),
+            "f6" => key = Some(Key::F6),
+            "f7" => key = Some(Key::F7),
+            "f8" => key = Some(Key::F8),
+            "f9" => key = Some(Key::F9),
+            "f10" => key = Some(Key::F10),
+            "f11" => key = Some(Key::F11),
+            "f12" => key = Some(Key::F12),
+            "enter" | "return" => key = Some(Key::Enter),
+            "esc" | "escape" => key = Some(Key::Escape),
+            "tab" => key = Some(Key::Tab),
+            "space" => key = Some(Key::Space),
+            "home" => key = Some(Key::Home),
+            "end" => key = Some(Key::End),
+            "pageup" => key = Some(Key::PageUp),
+            "pagedown" => key = Some(Key::PageDown),
+            "+" | "plus" => key = Some(Key::Plus),
+            "-" | "minus" => key = Some(Key::Minus),
+            "=" => key = Some(Key::Equals),
+            _ => return None,
+        }
+    }
+    key.map(|k| (ctrl, shift, alt, k))
 }
 
 fn default_version() -> u32 {
@@ -127,6 +218,8 @@ impl Default for GuiConfig {
             show_sidebar: true,
             bell: BellMode::default(),
             invert_scrolling: false,
+            hotkey_close_tab: default_hk_close(),
+            hotkey_new_cmd: default_hk_new_cmd(),
             quick_host: String::new(),
             quick_port: 22,
             quick_user: String::from("root"),

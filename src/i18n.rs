@@ -118,6 +118,8 @@ Config: ~/.xxssh (servers.json / settings.json / gui.json)", "轻量级图形 SS
     ("s_bell", "Terminal bell", "终端铃声", "終端鈴聲"),
     ("s_invert_scroll", "Invert mouse wheel", "反转滚轮方向", "反轉滾輪方向"),
     ("s_font", "Terminal font", "终端字体", "終端字體"),
+    ("hk_close_tab", "Close tab hotkey", "关闭页签热键", "關閉頁籤熱鍵"),
+    ("hk_new_cmd", "New CMD hotkey", "新建CMD热键", "新建CMD熱鍵"),
     ("s_font_default", "Default (system)", "默认（跟随系统）", "預設（跟隨系統）"),
     ("bell_mute", "Mute", "静音", "靜音"),
     ("bell_flash", "Flash", "闪烁", "閃爍"),
