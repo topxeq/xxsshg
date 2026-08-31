@@ -182,14 +182,14 @@ async fn connect_and_open(
     rows: u16,
     requests: mpsc::UnboundedSender<ConnectRequest>,
 ) -> Result<SessionHandle, ConnectError> {
-    let mut session = establish(server.clone(), opts, requests.clone()).await?;
+    let session = establish(server.clone(), opts, requests.clone()).await?;
     open_pty_after_auth(session, &server, cols, rows).await
 }
 
 /// Authenticated session -> PTY + shell + endpoints for a GUI terminal tab.
 async fn open_pty_after_auth(
     session: client::Handle<Handler>,
-    server: &Server,
+    _server: &Server,
     cols: u16,
     rows: u16,
 ) -> Result<SessionHandle, ConnectError> {
@@ -318,7 +318,7 @@ async fn open_pty_after_auth(
 }
 
 async fn establish(
-    mut server: Server,
+    server: Server,
     opts: ConnectOpts,
     requests: mpsc::UnboundedSender<ConnectRequest>,
 ) -> Result<client::Handle<Handler>, ConnectError> {
@@ -451,7 +451,7 @@ pub struct SftpClient {
 
 pub fn spawn_sftp(
     rt: &tokio::runtime::Handle,
-    server: Server,
+    server: Server, // used for connection identity (host/port/user/credentials)
     opts: ConnectOpts,
 ) -> (
     oneshot::Receiver<Result<SftpClient, ConnectError>>,
