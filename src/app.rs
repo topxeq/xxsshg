@@ -231,8 +231,9 @@ pub struct XxsshgApp {
     /// Tab close / new-cmd requested by a terminal hotkey (handled next frame)
     deferred_close: Option<usize>,
     deferred_new_cmd: bool,
-    /// egui time of the last hotkey handled (multi-pass / key-repeat dedup)
-    last_hotkey_time: f64,
+    /// hotkey key-state edge detectors (true = currently held)
+    hk_close_down: bool,
+    hk_new_down: bool,
 }
 
 impl XxsshgApp {
@@ -271,7 +272,8 @@ impl XxsshgApp {
             autoconnect_done: false,
             deferred_close: None,
             deferred_new_cmd: false,
-            last_hotkey_time: -1.0,
+            hk_close_down: false,
+            hk_new_down: false,
         }
     }
 
@@ -1255,48 +1257,31 @@ impl eframe::App for XxsshgApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
-        // App-wide hotkeys. NB: egui replays the same events across rendering
-        // passes, and holding a key generates OS repeats — trigger once per
-        // frame time and only on non-repeat presses.
+        // App-wide hotkeys, edge-detected on the KEY STATE (not on events):
+        // egui replays the same events across rendering passes and the OS
+        // auto-repeats held keys — both would spam. keys_down is stateful, so
+        // a rising edge (wasn't down -> down) fires exactly once per press.
         let hk_close = crate::gconfig::parse_hotkey(&self.gcfg.hotkey_close_tab);
         let hk_new = crate::gconfig::parse_hotkey(&self.gcfg.hotkey_new_cmd);
         if hk_close.is_some() || hk_new.is_some() {
-            let now = ui.ctx().input(|i| i.time);
-            let fresh_frame = now != self.last_hotkey_time;
-            if fresh_frame {
-                let mut do_close = false;
-                let mut do_new = false;
-                ui.ctx().input(|i| {
-                    for ev in &i.events {
-                        if let egui::Event::Key {
-                            key,
-                            modifiers,
-                            pressed: true,
-                            repeat: false,
-                            ..
-                        } = ev
-                        {
-                            let m = (modifiers.ctrl, modifiers.shift, modifiers.alt, *key);
-                            if hk_close.is_some() && hk_close == Some(m) {
-                                do_close = true;
-                            }
-                            if hk_new.is_some() && hk_new == Some(m) {
-                                do_new = true;
-                            }
-                        }
-                    }
-                });
-                if do_close || do_new {
-                    self.last_hotkey_time = now;
-                    if do_close && !self.tabs.is_empty() {
-                        self.deferred_close =
-                            Some(self.active_tab.min(self.tabs.len().saturating_sub(1)));
-                    }
-                    if do_new {
-                        self.deferred_new_cmd = true;
-                    }
+            let (mods, keys_down) = ui.ctx().input(|i| (i.modifiers, i.keys_down.clone()));
+            let hit = |hk: Option<(bool, bool, bool, egui::Key)>| match hk {
+                Some((c, sh, al, k)) => {
+                    mods.ctrl == c && mods.shift == sh && mods.alt == al && keys_down.contains(&k)
                 }
+                None => false,
+            };
+            let close_down = hit(hk_close);
+            let new_down = hit(hk_new);
+            if close_down && !self.hk_close_down {
+                self.deferred_close =
+                    Some(self.active_tab.min(self.tabs.len().saturating_sub(1)));
             }
+            if new_down && !self.hk_new_down {
+                self.deferred_new_cmd = true;
+            }
+            self.hk_close_down = close_down;
+            self.hk_new_down = new_down;
         }
 
         // Hotkey-initiated tab actions (deferred by the terminal widget)
