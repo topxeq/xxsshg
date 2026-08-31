@@ -538,22 +538,22 @@ impl SftpTab {
         });
 
 
-        // ---- dual panes ----
+        // ---- dual panes (fixed widths so both are always visible) ----
+        let pane_w = (ui.available_width() - 16.0) / 2.0;
+        let pane_h = (ui.available_height() - 8.0).max(120.0);
         ui.horizontal(|ui| {
             // local pane
-            ui.vertical(|ui| {
-                ui.set_min_width(ui.available_width() / 2.0 - 6.0);
+            ui.allocate_ui(egui::vec2(pane_w, pane_h), |ui| {
+                ui.set_min_width(pane_w);
                 ui.label(egui::RichText::new(self.local_dir.to_string_lossy().as_ref()).weak().small());
                 egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .max_height(ui.available_height() - 8.0)
                     .id_salt("sftp_local_list")
                     .show(ui, |ui| {
                         for (i, e) in self.local_entries.clone().iter().enumerate() {
                             let label = if e.is_dir {
                                 egui::RichText::new(format!("{}{}", e.name, "/")).strong()
                             } else {
-                                egui::RichText::new(format!("{}  ({})", e.name, Self::fmt_size(e.size))).weak()
+                                egui::RichText::new(format!("{}  ({})", e.name, fmt_size(e.size))).weak()
                             };
                             let resp = ui.selectable_label(self.local_sel == Some(i), label);
                             if resp.clicked() {
@@ -569,22 +569,20 @@ impl SftpTab {
             });
             ui.separator();
             // remote pane
-            ui.vertical(|ui| {
-                ui.set_min_width(ui.available_width() / 2.0 - 6.0);
-                ui.label(egui::RichText::new(self.remote_dir.as_str()).weak().small());
+            ui.allocate_ui(egui::vec2(pane_w, pane_h), |ui| {
+                ui.set_min_width(pane_w);
                 if self.loading {
-                    ui.spinner();
+                    ui.horizontal(|ui| { ui.spinner(); ui.label("..."); });
                 }
+                ui.label(egui::RichText::new(self.remote_dir.as_str()).weak().small());
                 egui::ScrollArea::vertical()
-                    .auto_shrink([false, false])
-                    .max_height(ui.available_height() - 8.0)
                     .id_salt("sftp_remote_list")
                     .show(ui, |ui| {
                         for (i, e) in self.remote_entries.clone().iter().enumerate() {
                             let label = if e.is_dir {
                                 egui::RichText::new(format!("{}{}", e.name, "/")).strong()
                             } else {
-                                egui::RichText::new(format!("{}  ({})", e.name, Self::fmt_size(e.size))).weak()
+                                egui::RichText::new(format!("{}  ({})", e.name, fmt_size(e.size))).weak()
                             };
                             let resp = ui.selectable_label(self.remote_sel == Some(i), label);
                             if resp.clicked() {
@@ -638,8 +636,8 @@ impl SftpTab {
                                 egui::RichText::new(format!(
                                     "{} {}/{}",
                                     t.name,
-                                    Self::fmt_size(t.done),
-                                    Self::fmt_size(t.total)
+                                    fmt_size(t.done),
+                                    fmt_size(t.total)
                                 ))
                                 .weak()
                                 .small(),
@@ -650,17 +648,6 @@ impl SftpTab {
         }
     }
 
-    pub fn fmt_size(n: u64) -> String {
-        if n >= 1 << 30 {
-            format!("{:.1} GB", n as f32 / (1 << 30) as f32)
-        } else if n >= 1 << 20 {
-            format!("{:.1} MB", n as f32 / (1 << 20) as f32)
-        } else if n >= 1 << 10 {
-            format!("{:.1} KB", n as f32 / (1 << 10) as f32)
-        } else {
-            format!("{n} B")
-        }
-    }
 
 
     /// confirm / prompt windows for SFTP ops
@@ -745,5 +732,17 @@ impl SftpTab {
                 ConfirmKind::RemoteMkdir => self.op_mkdir_remote(input),
             }
         }
+    }
+}
+
+pub fn fmt_size(n: u64) -> String {
+    if n >= 1 << 30 {
+        format!("{:.1} GB", n as f32 / (1 << 30) as f32)
+    } else if n >= 1 << 20 {
+        format!("{:.1} MB", n as f32 / (1 << 20) as f32)
+    } else if n >= 1 << 10 {
+        format!("{:.1} KB", n as f32 / (1 << 10) as f32)
+    } else {
+        format!("{n} B")
     }
 }
