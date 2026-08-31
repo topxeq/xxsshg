@@ -412,15 +412,6 @@ impl SftpTab {
         self.refresh_local();
     }
 
-    fn sftp_rename(&self, old: &str, new: &str) -> Result<(), String> {
-        // sync wrapper executed on the runtime
-        let sftp = self.sftp.clone();
-        let old = old.to_string();
-        let new = new.to_string();
-        self.rt.block_on(async move {
-            sftp.lock().await.rename(&old, &new).await.map_err(|e| e.to_string())
-        })
-    }
 
 
     /// Render the dual-pane browser + transfers
