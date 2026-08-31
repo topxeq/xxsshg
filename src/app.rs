@@ -1298,6 +1298,7 @@ impl eframe::App for XxsshgApp {
             self.toast(format!("{name} ✕"));
         }
         if self.deferred_new_cmd {
+            self.deferred_new_cmd = false;
             self.open_local_shell(ShellKind::Cmd);
         }
 
