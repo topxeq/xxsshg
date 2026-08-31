@@ -257,7 +257,6 @@ impl SftpTab {
         let lpath = self.local_dir.join(&lname);
         let rdir = self.remote_dir.clone();
         let sftp = self.sftp.clone();
-        let rt = self.rt.clone();
         let tx = self.op_tx.clone();
         let id = self.start_transfer(
             TransferKind::Upload,
@@ -267,8 +266,7 @@ impl SftpTab {
         let prog_id = id;
         let prog_tx = self.prog_tx.clone();
         self.rt.spawn(async move {
-            let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let total = if is_dir {
+                let total = if is_dir {
                 let (f, b) = sftp::count_local_bytes(&lpath);
                 let _ = f;
                 b
@@ -276,9 +274,7 @@ impl SftpTab {
                 std::fs::metadata(&lpath).map(|m| m.len()).unwrap_or(0)
             };
             let _ = prog_tx.send((prog_id, 0, total, None));
-            let sftp2 = sftp.clone();
-            let cancel2 = cancel.clone();
-            let prog_tx2 = prog_tx.clone();
+                                    let prog_tx2 = prog_tx.clone();
             let prog = move |done: u64| {
                 let _ = prog_tx2.send((prog_id, done.min(total), total, None));
             };
@@ -310,7 +306,6 @@ impl SftpTab {
         let rpath = sftp::join_remote(&self.remote_dir, &rname);
         let ldir = self.local_dir.clone();
         let sftp = self.sftp.clone();
-        let rt = self.rt.clone();
         let tx = self.op_tx.clone();
         let id = self.start_transfer(
             TransferKind::Download,
@@ -329,8 +324,7 @@ impl SftpTab {
                 size
             };
             let _ = prog_tx.send((id, 0, total, None));
-            let sftp2 = sftp.clone();
-            let prog_tx2 = prog_tx.clone();
+                        let prog_tx2 = prog_tx.clone();
             let prog = move |done: u64| {
                 let _ = prog_tx2.send((id, done.min(total), total, None));
             };

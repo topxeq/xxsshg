@@ -461,7 +461,7 @@ pub fn spawn_sftp(
     let (req_tx, req_rx) = mpsc::unbounded_channel();
     rt.spawn(async move {
         let res = async {
-            let mut session = establish(server.clone(), opts, req_tx.clone()).await?;
+            let session = establish(server.clone(), opts, req_tx.clone()).await?;
             let channel = session
                 .channel_open_session()
                 .await
