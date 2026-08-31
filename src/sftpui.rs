@@ -435,7 +435,7 @@ impl SftpTab {
         // Remote pane on the right: a real panel so both panes always fit
         egui::Panel::right(egui::Id::new("sftp_remote_pane"))
             .resizable(false)
-            .show_inside(ui, |ui| {
+            .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(tpl(tr(self.lang, "sftp_remote"), &[])).strong());
                     let r_go = ui.add(
