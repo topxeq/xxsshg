@@ -338,7 +338,6 @@ async fn establish(
 
     // Transport: SOCKS5 or direct (ProxyStream logic from xxssh)
     log::debug!("connect_and_open: begin, proxy={:?}", opts.proxy);
-                eprintln!("[sftp-e2e] transport begin");
     let stream: ProxyStream = match opts.proxy.as_deref() {
         Some(url) => {
             let p = parse_proxy_url(url).map_err(ConnectError::Proxy)?;
@@ -409,7 +408,6 @@ async fn establish(
         reject_reason: None,
     };
 
-                eprintln!("[sftp-e2e] transport connected");
     let handshake = client::connect_stream(config, stream, handler);
     let mut session = match limit {
         Some(d) => match tokio::time::timeout(d, handshake).await {
@@ -426,7 +424,6 @@ async fn establish(
     .map_err(|e| ConnectError::Network(e.to_string()))?;
 
     log::debug!("connect_and_open: handshake done, authenticating ({:?})", server.auth);
-                eprintln!("[sftp-e2e] handshake done, authenticating");
     // Authenticate
     let auth = match server.auth {
         AuthMethod::Password => auth_password(&mut session, &server, &requests, Language::En).await,
@@ -465,7 +462,6 @@ pub fn spawn_sftp(
     rt.spawn(async move {
         let res = async {
             let mut session = establish(server.clone(), opts, req_tx.clone()).await?;
-            eprintln!("[sftp] auth done, opening channel");
             let channel = session
                 .channel_open_session()
                 .await
@@ -474,7 +470,6 @@ pub fn spawn_sftp(
                 .request_subsystem(true, "sftp")
                 .await
                 .map_err(|e| ConnectError::Other(e.to_string()))?;
-            eprintln!("[sftp] subsystem open, creating session");
             let sftp = russh_sftp::client::SftpSession::new(channel.into_stream())
                 .await
                 .map_err(|e| ConnectError::Other(e.to_string()))?;
