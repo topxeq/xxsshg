@@ -14,6 +14,7 @@ pub struct FileEntry {
     pub name: String,
     pub is_dir: bool,
     pub size: u64,
+    #[allow(dead_code)] // shown in a future detailed-list view
     pub mtime: u32,
 }
 
@@ -54,6 +55,7 @@ pub async fn list_dir(
     Ok(out)
 }
 
+#[allow(dead_code)] // reserved: open-in-app feature
 pub async fn remote_is_dir(sftp: &russh_sftp::client::SftpSession, path: &str) -> Option<bool> {
     let md = sftp.metadata(path).await.ok()?;
     Some(md.is_dir())
@@ -244,6 +246,7 @@ pub async fn count_remote_bytes(
 }
 
 /// Arc<Mutex<SftpSession>> convenience wrapper used by the SFTP tab
+#[allow(dead_code)] // used by the SFTP tab through list_dir paths
 pub async fn list_dir_shared(
     sftp: &Arc<tokio::sync::Mutex<russh_sftp::client::SftpSession>>,
     path: &str,
