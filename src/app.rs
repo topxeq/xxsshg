@@ -1260,6 +1260,37 @@ impl eframe::App for XxsshgApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
+        // App-wide hotkeys: strip matching key events at the input layer so a
+        // focused terminal neither sends them to the PTY nor re-handles them
+        let hk_close = crate::gconfig::parse_hotkey(&self.gcfg.hotkey_close_tab);
+        let hk_new = crate::gconfig::parse_hotkey(&self.gcfg.hotkey_new_cmd);
+        if hk_close.is_some() || hk_new.is_some() {
+            let mut do_close = false;
+            let mut do_new = false;
+            ui.ctx().input_mut(|i| {
+                i.events.retain(|ev| {
+                    if let egui::Event::Key { key, modifiers, pressed: true, .. } = ev {
+                        let m = (modifiers.ctrl, modifiers.shift, modifiers.alt, *key);
+                        if hk_close.is_some() && hk_close == Some(m) {
+                            do_close = true;
+                            return false;
+                        }
+                        if hk_new.is_some() && hk_new == Some(m) {
+                            do_new = true;
+                            return false;
+                        }
+                    }
+                    true
+                });
+            });
+            if do_close && !self.tabs.is_empty() {
+                self.deferred_close = Some(self.active_tab.min(self.tabs.len().saturating_sub(1)));
+            }
+            if do_new {
+                self.deferred_new_cmd = true;
+            }
+        }
+
         // Hotkey-initiated tab actions (deferred by the terminal widget)
         if let Some(i) = self.deferred_close.take() {
             let name = self.tabs.get(i).map(|t| t.name().to_string()).unwrap_or_default();

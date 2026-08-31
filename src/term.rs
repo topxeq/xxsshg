@@ -450,15 +450,16 @@ impl Terminal {
                         // click on track: jump so the thumb centers on the click
                         let ty = (pos.y - track.min.y - thumb_h / 2.0)
                             / (track_h - thumb_h).max(1.0);
-                        let target = (ty.clamp(0.0, 1.0) * max_off).round() as usize;
-                        scroll_target = Some(target);
+                        scroll_target =
+                            Some(((1.0 - ty.clamp(0.0, 1.0)) * max_off).round() as usize);
                         self.scroll_drag = Some(0.0);
                     }
                 }
             } else if resp.dragged() {
                 if let (Some(grab), Some(pos)) = (self.scroll_drag, resp.interact_pointer_pos()) {
                     let ty = (pos.y - track.min.y - grab) / (track_h - thumb_h).max(1.0);
-                    scroll_target = Some((ty.clamp(0.0, 1.0) * max_off).round() as usize);
+                    scroll_target =
+                        Some(((1.0 - ty.clamp(0.0, 1.0)) * max_off).round() as usize);
                 }
             } else if self.scroll_drag.is_some() && !resp.dragged() {
                 self.scroll_drag = None;
