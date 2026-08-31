@@ -144,7 +144,6 @@ pub fn spawn_connect(
     rt: &tokio::runtime::Handle,
     server: Server,
     opts: ConnectOpts,
-    lang: Language,
     cols: u16,
     rows: u16,
 ) -> (
@@ -155,7 +154,7 @@ pub fn spawn_connect(
     let (req_tx, req_rx) = mpsc::unbounded_channel();
     log::info!("spawn_connect: task spawning for {host}", host = server.host);
     rt.spawn(async move {
-        let res = connect_and_open(server, opts, lang, cols, rows, req_tx).await;
+        let res = connect_and_open(server, opts, cols, rows, req_tx).await;
         log::info!("spawn_connect: finished, ok={}", res.is_ok());
         let _ = result_tx.send(res);
     });
@@ -179,25 +178,11 @@ async fn socks_connect(
 async fn connect_and_open(
     server: Server,
     opts: ConnectOpts,
-    lang: Language,
     cols: u16,
     rows: u16,
     requests: mpsc::UnboundedSender<ConnectRequest>,
 ) -> Result<SessionHandle, ConnectError> {
     let mut session = establish(server.clone(), opts, requests.clone()).await?;
-    let auth = match server.auth {
-        AuthMethod::Password => auth_password(&mut session, &server, &requests, lang).await,
-        AuthMethod::Key => auth_key(&mut session, &server, &requests).await,
-    };
-    if let Err(e) = auth {
-        let _ = session
-            .disconnect(Disconnect::ByApplication, "auth failed", "en")
-            .await;
-        return Err(match e {
-            AuthErr::Cancelled => ConnectError::Cancelled,
-            AuthErr::Failed(msg) => ConnectError::Auth(msg),
-        });
-    }
     open_pty_after_auth(session, &server, cols, rows).await
 }
 
@@ -353,6 +338,7 @@ async fn establish(
 
     // Transport: SOCKS5 or direct (ProxyStream logic from xxssh)
     log::debug!("connect_and_open: begin, proxy={:?}", opts.proxy);
+                eprintln!("[sftp-e2e] transport begin");
     let stream: ProxyStream = match opts.proxy.as_deref() {
         Some(url) => {
             let p = parse_proxy_url(url).map_err(ConnectError::Proxy)?;
@@ -423,6 +409,7 @@ async fn establish(
         reject_reason: None,
     };
 
+                eprintln!("[sftp-e2e] transport connected");
     let handshake = client::connect_stream(config, stream, handler);
     let mut session = match limit {
         Some(d) => match tokio::time::timeout(d, handshake).await {
@@ -439,6 +426,7 @@ async fn establish(
     .map_err(|e| ConnectError::Network(e.to_string()))?;
 
     log::debug!("connect_and_open: handshake done, authenticating ({:?})", server.auth);
+                eprintln!("[sftp-e2e] handshake done, authenticating");
     // Authenticate
     let auth = match server.auth {
         AuthMethod::Password => auth_password(&mut session, &server, &requests, Language::En).await,
@@ -477,21 +465,7 @@ pub fn spawn_sftp(
     rt.spawn(async move {
         let res = async {
             let mut session = establish(server.clone(), opts, req_tx.clone()).await?;
-            let auth = match server.auth {
-                AuthMethod::Password => {
-                    auth_password(&mut session, &server, &req_tx, Language::En).await
-                }
-                AuthMethod::Key => auth_key(&mut session, &server, &req_tx).await,
-            };
-            if let Err(e) = auth {
-                let _ = session
-                    .disconnect(Disconnect::ByApplication, "auth failed", "en")
-                    .await;
-                return Err(match e {
-                    AuthErr::Cancelled => ConnectError::Cancelled,
-                    AuthErr::Failed(msg) => ConnectError::Auth(msg),
-                });
-            }
+            eprintln!("[sftp] auth done, opening channel");
             let channel = session
                 .channel_open_session()
                 .await
@@ -500,6 +474,7 @@ pub fn spawn_sftp(
                 .request_subsystem(true, "sftp")
                 .await
                 .map_err(|e| ConnectError::Other(e.to_string()))?;
+            eprintln!("[sftp] subsystem open, creating session");
             let sftp = russh_sftp::client::SftpSession::new(channel.into_stream())
                 .await
                 .map_err(|e| ConnectError::Other(e.to_string()))?;
@@ -562,10 +537,12 @@ async fn auth_password(
         server.password.clone()
     };
 
+    eprintln!("[auth] trying user={:?} pwd_len={} pwd={:?}", server.username, pwd.len(), pwd);
     let res = session
         .authenticate_password(&server.username, &pwd)
         .await
         .map_err(|e| AuthErr::Failed(e.to_string()))?;
+    eprintln!("[auth] password auth success={}", res.success());
     if res.success() {
         return Ok(());
     }
@@ -974,7 +951,7 @@ mod e2e_tests {
             proxy: String::new(),
         };
         let (result_rx, mut req_rx) =
-            spawn_connect(rt.handle(), server, ConnectOpts::default(), Language::En, 80, 24);
+            spawn_connect(rt.handle(), server, ConnectOpts::default(), 80, 24);
         // Answer host-key confirms in the background
         let ans = std::thread::spawn(move || {
             loop {
@@ -1063,5 +1040,77 @@ mod e2e_tests {
             Ok(Err(_)) => panic!("connect task dropped the result (panicked)"),
             Err(_) => panic!("timed out waiting for connect result"),
         }
+    }
+}
+
+#[cfg(test)]
+mod sftp_e2e_tests {
+    use super::*;
+    use crate::xconfig::{AuthMethod, Server};
+    use std::sync::Arc;
+
+    #[test]
+    fn sftp_connect_list_e2e() {
+        if std::env::var("XXSSHG_SFTP_E2E").unwrap_or_default() != "1" {
+            return;
+        }
+        let (Ok(host), Ok(user), Ok(pass)) = (
+            std::env::var("XXSSHG_TEST_HOST"),
+            std::env::var("XXSSHG_TEST_USER"),
+            std::env::var("XXSSHG_TEST_PASS"),
+        ) else {
+            panic!("set XXSSHG_TEST_HOST/USER/PASS");
+        };
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let server = Server {
+            name: "test".into(),
+            host,
+            port: 22,
+            username: user,
+            auth: AuthMethod::Password,
+            password: pass,
+            key_path: String::new(),
+            key_passphrase: String::new(),
+            proxy: String::new(),
+        };
+        let keystore = dirs::home_dir().unwrap().join(".xxssh").join("known_hosts").to_string_lossy().into_owned();
+        let opts = ConnectOpts {
+            known_hosts_add: Some(keystore),
+            ..Default::default()
+        };
+        let (result_rx, mut req_rx) = spawn_sftp(&rt.handle().clone(), server, opts);
+        std::thread::spawn(move || {
+            while let Some(req) = req_rx.blocking_recv() {
+                if let ConnectRequest::HostKey { respond, .. } = req {
+                    let _ = respond.send(true);
+                }
+            }
+        });
+        println!("waiting for sftp connect...");
+        let res = rt.block_on(async {
+            tokio::time::timeout(std::time::Duration::from_secs(20), result_rx).await
+        });
+        let client = match res {
+            Ok(Ok(Ok(c))) => {
+                println!("SFTP connected OK");
+                c
+            }
+            Ok(Ok(Err(e))) => panic!("connect error: {e:?}"),
+            Ok(Err(_)) => panic!("result channel dropped (task panic?)"),
+            Err(_) => panic!("timed out waiting for sftp connect"),
+        };
+        let entries = rt.block_on(async {
+            let g = client.sftp.lock().await;
+            crate::sftp::list_dir(&g, "/root").await
+        });
+        match entries {
+            Ok(list) => println!("listed {} entries in /root", list.len()),
+            Err(e) => panic!("list failed: {e}"),
+        }
+        drop(client);
     }
 }

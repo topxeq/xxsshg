@@ -331,7 +331,7 @@ impl XxsshgApp {
         );
         log::info!("connect_server: spawning");
         let (cols, rows) = self.last_grid;
-        let (result_rx, request_rx) = session::spawn_connect(&self.rt, server, opts, self.lang(), cols, rows);
+        let (result_rx, request_rx) = session::spawn_connect(&self.rt, server, opts, cols, rows);
         self.tabs.push(Tab::Connecting {
             name,
             result_rx,
