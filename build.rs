@@ -2,6 +2,11 @@
 //! application icon + version info as exe resources.
 
 fn main() {
+    // Always re-run so the embedded hash stays fresh after commits
+    println!("cargo:rerun-if-changed=build.rs");
+    println!("cargo:rerun-if-changed=.git/HEAD");
+    println!("cargo:rerun-if-changed=.git/refs/heads/main");
+
     let hash = std::process::Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
         .output()
@@ -10,9 +15,6 @@ fn main() {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|| "dev".into());
     println!("cargo:rustc-env=XXSSHG_BUILD_HASH={hash}");
-    // Rebuild when HEAD moves so the build number stays fresh
-    println!("cargo:rerun-if-changed=.git/HEAD");
-    println!("cargo:rerun-if-changed=build.rs");
 
     #[cfg(windows)]
     {

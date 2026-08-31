@@ -20,7 +20,10 @@ pub fn diag_log(msg: &str) {
     use std::io::Write;
     use std::sync::OnceLock;
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    if !*ENABLED.get_or_init(|| std::env::var("XXSSHG_DEBUG_CURSOR").ok().as_deref() == Some("1")) {
+    if !*ENABLED.get_or_init(|| {
+        let on = |k: &str| std::env::var(k).ok().as_deref() == Some("1");
+        on("XXSSHG_DEBUG_CURSOR") || on("XXSSHG_HOTKEY_DEBUG")
+    }) {
         return;
     }
     if let Some(home) = dirs::home_dir() {

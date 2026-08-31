@@ -1273,11 +1273,18 @@ impl eframe::App for XxsshgApp {
             };
             let close_down = hit(hk_close);
             let new_down = hit(hk_new);
+            crate::term::diag_log(&format!(
+                "[hotkey] mods(c={} s={} a={}) keys_down={:?} | close_down={} (was {}) | new_down={} (was {}) | tabs={}",
+                mods.ctrl, mods.shift, mods.alt, keys_down,
+                close_down, self.hk_close_down, new_down, self.hk_new_down, self.tabs.len()
+            ));
             if close_down && !self.hk_close_down {
+                crate::term::diag_log("[hotkey] -> close tab (rising edge)");
                 self.deferred_close =
                     Some(self.active_tab.min(self.tabs.len().saturating_sub(1)));
             }
             if new_down && !self.hk_new_down {
+                crate::term::diag_log("[hotkey] -> new cmd tab (rising edge)");
                 self.deferred_new_cmd = true;
             }
             self.hk_close_down = close_down;
