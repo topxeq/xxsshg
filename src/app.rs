@@ -1045,7 +1045,7 @@ impl XxsshgApp {
         // Quick Connect dialog
         if self.quick.is_some() {
             let mut open = self.quick_open;
-            let mut connect = false;
+            let connect = false;
             let mut cancel = false;
             let lang = dlg_lang;
             let win = egui::Window::new(tr(lang, "qc_title"))

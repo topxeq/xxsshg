@@ -1,4 +1,3 @@
-use crate::local;
 #[test]
 fn iso_one_shot() {
     std::env::set_var("XXSSHG_LOCAL_CMD", "cmd.exe");
