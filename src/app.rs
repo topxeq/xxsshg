@@ -141,6 +141,8 @@ struct QuickForm {
     username: String,
     password: String,
     error: Option<String>,
+    /// request focus for the host field on the first frame
+    focus_host: bool,
 }
 
 impl QuickForm {
@@ -151,6 +153,7 @@ impl QuickForm {
             username: if g.quick_user.is_empty() { "root".into() } else { g.quick_user.clone() },
             password: String::new(),
             error: None,
+            focus_host: true,
         }
     }
 
@@ -1051,27 +1054,38 @@ impl XxsshgApp {
                 .resizable(false);
             win.show(ui, |ui| {
                 let qc = self.quick.as_mut().unwrap();
+                let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let mut submit_on_enter = false;
                 egui::Grid::new("quick_grid")
                     .num_columns(2)
                     .spacing([10.0, 6.0])
                     .show(ui, |ui| {
                         ui.label(tr(lang, "f_host"));
-                        ui.add(
+                        let r = ui.add(
                             egui::TextEdit::singleline(&mut qc.host)
                                 .hint_text("example.com")
                                 .desired_width(220.0),
                         );
+                        if qc.focus_host {
+                            r.request_focus();
+                            qc.focus_host = false;
+                        }
+                        submit_on_enter |= r.lost_focus() && enter;
                         ui.end_row();
                         ui.label(tr(lang, "f_port"));
-                        ui.add(egui::TextEdit::singleline(&mut qc.port).desired_width(80.0));
+                        let r = ui.add(egui::TextEdit::singleline(&mut qc.port).desired_width(80.0));
+                        submit_on_enter |= r.lost_focus() && enter;
                         ui.end_row();
                         ui.label(tr(lang, "f_user"));
-                        ui.text_edit_singleline(&mut qc.username);
+                        let r = ui.text_edit_singleline(&mut qc.username);
+                        submit_on_enter |= r.lost_focus() && enter;
                         ui.end_row();
                         ui.label(tr(lang, "f_password"));
-                        ui.add(egui::TextEdit::singleline(&mut qc.password).password(true));
+                        let r = ui.add(egui::TextEdit::singleline(&mut qc.password).password(true));
+                        submit_on_enter |= r.lost_focus() && enter;
                         ui.end_row();
                     });
+                let mut connect = connect || submit_on_enter;
                 if let Some(err) = &qc.error {
                     ui.colored_label(egui::Color32::LIGHT_RED, err);
                 }
@@ -1144,6 +1158,7 @@ impl XxsshgApp {
             let lang = dlg_lang;
             let mut answer: Option<bool> = None;
             egui::Window::new(tr(lang, "quit_title"))
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
                 .collapsible(false)
                 .resizable(false)
                 .show(ui, |ui| {
