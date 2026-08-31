@@ -231,6 +231,8 @@ pub struct XxsshgApp {
     /// Tab close / new-cmd requested by a terminal hotkey (handled next frame)
     deferred_close: Option<usize>,
     deferred_new_cmd: bool,
+    /// egui time of the last hotkey handled (multi-pass / key-repeat dedup)
+    last_hotkey_time: f64,
 }
 
 impl XxsshgApp {
@@ -269,6 +271,7 @@ impl XxsshgApp {
             autoconnect_done: false,
             deferred_close: None,
             deferred_new_cmd: false,
+            last_hotkey_time: -1.0,
         }
     }
 
@@ -677,14 +680,6 @@ impl XxsshgApp {
                 term.hotkey_close = crate::gconfig::parse_hotkey(&self.gcfg.hotkey_close_tab);
                 term.hotkey_new = crate::gconfig::parse_hotkey(&self.gcfg.hotkey_new_cmd);
                 let resized = term.paint(ui, self.gcfg.font_size, self.gcfg.copy_on_select, self.gcfg.invert_scrolling);
-                let close_requested = std::mem::take(&mut term.pending_close_tab);
-                let new_cmd_requested = std::mem::take(&mut term.pending_new_cmd);
-                if close_requested {
-                    self.deferred_close = Some(self.active_tab);
-                }
-                if new_cmd_requested {
-                    self.deferred_new_cmd = true;
-                }
                 if let Some(zoom) = term.pending_zoom.take() {
                     if zoom.is_nan() {
                         self.gcfg.font_size = 14.0;
@@ -1260,34 +1255,47 @@ impl eframe::App for XxsshgApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
 
-        // App-wide hotkeys: strip matching key events at the input layer so a
-        // focused terminal neither sends them to the PTY nor re-handles them
+        // App-wide hotkeys. NB: egui replays the same events across rendering
+        // passes, and holding a key generates OS repeats — trigger once per
+        // frame time and only on non-repeat presses.
         let hk_close = crate::gconfig::parse_hotkey(&self.gcfg.hotkey_close_tab);
         let hk_new = crate::gconfig::parse_hotkey(&self.gcfg.hotkey_new_cmd);
         if hk_close.is_some() || hk_new.is_some() {
-            let mut do_close = false;
-            let mut do_new = false;
-            ui.ctx().input_mut(|i| {
-                i.events.retain(|ev| {
-                    if let egui::Event::Key { key, modifiers, pressed: true, .. } = ev {
-                        let m = (modifiers.ctrl, modifiers.shift, modifiers.alt, *key);
-                        if hk_close.is_some() && hk_close == Some(m) {
-                            do_close = true;
-                            return false;
-                        }
-                        if hk_new.is_some() && hk_new == Some(m) {
-                            do_new = true;
-                            return false;
+            let now = ui.ctx().input(|i| i.time);
+            let fresh_frame = now != self.last_hotkey_time;
+            if fresh_frame {
+                let mut do_close = false;
+                let mut do_new = false;
+                ui.ctx().input(|i| {
+                    for ev in &i.events {
+                        if let egui::Event::Key {
+                            key,
+                            modifiers,
+                            pressed: true,
+                            repeat: false,
+                            ..
+                        } = ev
+                        {
+                            let m = (modifiers.ctrl, modifiers.shift, modifiers.alt, *key);
+                            if hk_close.is_some() && hk_close == Some(m) {
+                                do_close = true;
+                            }
+                            if hk_new.is_some() && hk_new == Some(m) {
+                                do_new = true;
+                            }
                         }
                     }
-                    true
                 });
-            });
-            if do_close && !self.tabs.is_empty() {
-                self.deferred_close = Some(self.active_tab.min(self.tabs.len().saturating_sub(1)));
-            }
-            if do_new {
-                self.deferred_new_cmd = true;
+                if do_close || do_new {
+                    self.last_hotkey_time = now;
+                    if do_close && !self.tabs.is_empty() {
+                        self.deferred_close =
+                            Some(self.active_tab.min(self.tabs.len().saturating_sub(1)));
+                    }
+                    if do_new {
+                        self.deferred_new_cmd = true;
+                    }
+                }
             }
         }
 
