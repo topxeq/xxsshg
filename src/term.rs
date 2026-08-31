@@ -426,7 +426,8 @@ impl Terminal {
             let max_off = (total_lines - self.rows as usize) as f32;
 
             let thumb_h = (track_h * (self.rows as f32 / total_lines as f32)).max(28.0);
-            let t = if max_off > 0.0 { offset as f32 / max_off } else { 0.0 };
+            // offset 0 = live (newest) => thumb at the BOTTOM of the track
+            let t = if max_off > 0.0 { 1.0 - offset as f32 / max_off } else { 1.0 };
             let thumb_y = track.min.y + (track_h - thumb_h) * t;
             let thumb_rect =
                 egui::Rect::from_min_size(egui::pos2(track.min.x, thumb_y), egui::vec2(track_w, thumb_h));
