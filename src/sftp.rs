@@ -3,7 +3,7 @@
 //! xxssh 0.5.2 src/sftp.rs, trimmed to what the GUI needs).
 
 use russh_sftp::protocol::OpenFlags;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -16,12 +16,23 @@ pub const ANSWER_OVERWRITE: u8 = 1;
 pub const ANSWER_SKIP: u8 = 2;
 pub const ANSWER_OVERWRITE_ALL: u8 = 3;
 pub const ANSWER_SKIP_ALL: u8 = 4;
+pub const ANSWER_RENAME: u8 = 5;
+pub const ANSWER_RENAME_ALL: u8 = 6;
+
+/// What to do with a conflicting destination
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decision {
+    Overwrite,
+    Skip,
+    /// transfer under an auto-suffixed name ("report.doc" -> "report (2).doc")
+    Rename,
+}
 
 /// Conflict policy for transfers (mirrors xxssh TUI's Overwrite enum):
-/// ask the UI on each conflict; sticky answers from 覆盖全部/跳过全部 are
-/// honored for the rest of the transfer. One policy per transfer operation.
+/// ask the UI on each conflict; sticky answers from 全部覆盖/全部跳过/全部重命名
+/// are honored for the rest of the transfer. One policy per transfer operation.
 pub struct ConflictPolicy {
-    /// 0 = ask each, 1 = overwrite-all, 2 = skip-all
+    /// 0 = ask each, 1 = overwrite-all, 2 = skip-all, 3 = rename-all
     sticky: AtomicU8,
     ask: mpsc::UnboundedSender<(String, oneshot::Sender<u8>)>,
 }
@@ -37,29 +48,100 @@ impl ConflictPolicy {
         Self { sticky: AtomicU8::new(1), ask: tx }
     }
 
-    /// true = transfer over `dest`, false = skip this item
-    pub async fn decide(&self, dest: &str) -> bool {
+    /// What to do with a destination that already exists.
+    pub async fn decide(&self, dest: &str) -> Decision {
         match self.sticky.load(Ordering::Relaxed) {
-            1 => return true,
-            2 => return false,
+            1 => return Decision::Overwrite,
+            2 => return Decision::Skip,
+            3 => return Decision::Rename,
             _ => {}
         }
         let (tx, rx) = oneshot::channel();
         if self.ask.send((dest.to_string(), tx)).is_err() {
-            return true; // UI gone: keep the old overwrite behavior
+            return Decision::Overwrite; // UI gone: keep the old overwrite behavior
         }
         match rx.await {
             Ok(ANSWER_OVERWRITE_ALL) => {
                 self.sticky.store(1, Ordering::Relaxed);
-                true
+                Decision::Overwrite
             }
             Ok(ANSWER_SKIP_ALL) => {
                 self.sticky.store(2, Ordering::Relaxed);
-                false
+                Decision::Skip
             }
-            Ok(ANSWER_OVERWRITE) => true,
-            _ => false,
+            Ok(ANSWER_RENAME_ALL) => {
+                self.sticky.store(3, Ordering::Relaxed);
+                Decision::Rename
+            }
+            Ok(ANSWER_OVERWRITE) => Decision::Overwrite,
+            Ok(ANSWER_RENAME) => Decision::Rename,
+            _ => Decision::Skip,
         }
+    }
+}
+
+/// Explorer-style collision suffix: "report.doc" -> "report (2).doc"
+pub fn suffixed_name(orig: &str, n: u32) -> String {
+    match orig.rfind('.') {
+        Some(i) if i > 0 => format!("{} ({n}){}", &orig[..i], &orig[i..]),
+        _ => format!("{orig} ({n})"),
+    }
+}
+
+/// First non-existing local path for `path` (auto-suffix loop, timestamp fallback)
+pub fn free_local_name(path: &Path) -> PathBuf {
+    if !path.exists() {
+        return path.to_path_buf();
+    }
+    let dir = path.parent().map(|p| p.to_path_buf()).unwrap_or_default();
+    let name = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "file".into());
+    for n in 2..100 {
+        let cand = dir.join(suffixed_name(&name, n));
+        if !cand.exists() {
+            return cand;
+        }
+    }
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    dir.join(format!("{millis}-{name}"))
+}
+
+/// First non-existing remote path for `path` (auto-suffix loop, timestamp fallback)
+pub async fn free_remote_name(
+    sftp: &russh_sftp::client::SftpSession,
+    path: &str,
+) -> String {
+    if sftp.metadata(path).await.is_err() {
+        return path.to_string();
+    }
+    let (dir, name) = match path.rfind('/') {
+        Some(i) => (path[..i].to_string(), path[i + 1..].to_string()),
+        None => (String::new(), path.to_string()),
+    };
+    for n in 2..100 {
+        let cand_name = suffixed_name(&name, n);
+        let cand = if dir.is_empty() {
+            cand_name
+        } else {
+            join_remote(&dir, &cand_name)
+        };
+        if sftp.metadata(&cand).await.is_err() {
+            return cand;
+        }
+    }
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    if dir.is_empty() {
+        format!("{millis}-{name}")
+    } else {
+        join_remote(&dir, &format!("{millis}-{name}"))
     }
 }
 
@@ -156,7 +238,7 @@ pub async fn delete_recursive(
 }
 
 /// Download a single remote file with progress (done, total).
-/// If the local destination exists, `policy` decides overwrite vs skip.
+/// If the local destination exists, `policy` decides overwrite/skip/rename.
 pub async fn download_file(
     sftp: &russh_sftp::client::SftpSession,
     remote: &str,
@@ -165,11 +247,16 @@ pub async fn download_file(
     progress: &(dyn Fn(u64) + Send + Sync),
     policy: &ConflictPolicy,
 ) -> Result<u64, String> {
-    if local.exists() && !policy.decide(&local.to_string_lossy()).await {
-        return Ok(0); // skipped
+    let mut local = local.to_path_buf();
+    if local.exists() {
+        match policy.decide(&local.to_string_lossy()).await {
+            Decision::Overwrite => {}
+            Decision::Skip => return Ok(0),
+            Decision::Rename => local = free_local_name(&local),
+        }
     }
     let mut from = sftp.open(remote).await.map_err(|e| e.to_string())?;
-    let mut to = std::fs::File::create(local).map_err(|e| e.to_string())?;
+    let mut to = std::fs::File::create(&local).map_err(|e| e.to_string())?;
     let mut buf = vec![0u8; BUF];
     let mut done = 0u64;
     loop {
@@ -186,7 +273,7 @@ pub async fn download_file(
 }
 
 /// Upload a single local file with progress (done, total).
-/// If the remote destination exists, `policy` decides overwrite vs skip.
+/// If the remote destination exists, `policy` decides overwrite/skip/rename.
 pub async fn upload_file(
     sftp: &russh_sftp::client::SftpSession,
     local: &Path,
@@ -195,12 +282,17 @@ pub async fn upload_file(
     progress: &(dyn Fn(u64) + Send + Sync),
     policy: &ConflictPolicy,
 ) -> Result<u64, String> {
-    if sftp.metadata(remote).await.is_ok() && !policy.decide(remote).await {
-        return Ok(0); // skipped
+    let mut dest = remote.to_string();
+    if sftp.metadata(&dest).await.is_ok() {
+        match policy.decide(&dest).await {
+            Decision::Overwrite => {}
+            Decision::Skip => return Ok(0),
+            Decision::Rename => dest = free_remote_name(sftp, &dest).await,
+        }
     }
     let mut from = std::fs::File::open(local).map_err(|e| e.to_string())?;
     let mut to = sftp
-        .open_with_flags(remote, OpenFlags::CREATE | OpenFlags::WRITE | OpenFlags::TRUNCATE)
+        .open_with_flags(&dest, OpenFlags::CREATE | OpenFlags::WRITE | OpenFlags::TRUNCATE)
         .await
         .map_err(|e| e.to_string())?;
     let mut buf = vec![0u8; BUF];
@@ -373,5 +465,13 @@ mod tests {
         assert_eq!(fmt_time_unix(1_000_000_000), "2001-09-09 01:46:40 UTC");
         // leap year day: 2024-02-29 00:00:00 = 1709164800
         assert_eq!(fmt_time_unix(1_709_164_800), "2024-02-29 00:00:00 UTC");
+    }
+
+    #[test]
+    fn suffixed_name_keeps_extension() {
+        assert_eq!(suffixed_name("report.doc", 2), "report (2).doc");
+        assert_eq!(suffixed_name("noext", 3), "noext (3)");
+        // leading dot is part of the name, not an extension
+        assert_eq!(suffixed_name(".gitignore", 2), ".gitignore (2)");
     }
 }

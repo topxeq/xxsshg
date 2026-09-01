@@ -563,24 +563,15 @@ impl SftpTab {
         if !valid_name(&name) {
             return;
         }
-        let mut final_name = name.clone();
-        let mut n = 2;
-        while self.local_dir.join(&final_name).exists() {
-            final_name = suffixed_name(&name, n);
-            n += 1;
-            if n > 99 {
-                self.error = Some(name);
-                return;
-            }
-        }
-        if let Err(e) = std::fs::File::create(self.local_dir.join(&final_name)) {
+        let path = sftp::free_local_name(&self.local_dir.join(&name));
+        if let Err(e) = std::fs::File::create(&path) {
             self.error = Some(e.to_string());
         }
         self.refresh_local();
     }
 
     /// create an empty remote file via SFTP (CREATE|WRITE keeps existing content
-    /// if the name is taken — the suffix loop avoids that in the first place)
+    /// if the name is taken — the free-name lookup avoids that in the first place)
     fn op_create_remote_file(&mut self, name: String) {
         if !valid_name(&name) {
             return;
@@ -588,20 +579,10 @@ impl SftpTab {
         let dir = self.remote_dir.clone();
         let sftp = self.sftp.clone();
         let tx = self.op_tx.clone();
+        let start = sftp::join_remote(&dir, &name);
         self.rt.spawn(async move {
             let g = sftp.lock().await;
-            let mut final_name = name.clone();
-            let mut n = 2;
-            while g.metadata(sftp::join_remote(&dir, &final_name)).await.is_ok() {
-                final_name = suffixed_name(&name, n);
-                n += 1;
-                if n > 99 {
-                    drop(g);
-                    let _ = tx.send(OpMsg::Error(name));
-                    return;
-                }
-            }
-            let path = sftp::join_remote(&dir, &final_name);
+            let path = sftp::free_remote_name(&g, &start).await;
             let r = g
                 .open_with_flags(&path, OpenFlags::CREATE | OpenFlags::WRITE)
                 .await
@@ -1223,6 +1204,9 @@ impl SftpTab {
                     if ui.button(tpl(tr(lang, "sftp_skip"), &[])).clicked() {
                         choice = Some(sftp::ANSWER_SKIP);
                     }
+                    if ui.button(tpl(tr(lang, "sftp_rename"), &[])).clicked() {
+                        choice = Some(sftp::ANSWER_RENAME);
+                    }
                 });
                 ui.horizontal(|ui| {
                     if ui.button(tpl(tr(lang, "sftp_ovw_all"), &[])).clicked() {
@@ -1230,6 +1214,9 @@ impl SftpTab {
                     }
                     if ui.button(tpl(tr(lang, "sftp_skip_all"), &[])).clicked() {
                         choice = Some(sftp::ANSWER_SKIP_ALL);
+                    }
+                    if ui.button(tpl(tr(lang, "sftp_rename_all"), &[])).clicked() {
+                        choice = Some(sftp::ANSWER_RENAME_ALL);
                     }
                 });
             });
@@ -1443,14 +1430,6 @@ fn valid_name(name: &str) -> bool {
         && !name.chars().any(|c| {
             matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
         })
-}
-
-/// Explorer-style collision suffix: "report.doc" -> "report (2).doc"
-fn suffixed_name(orig: &str, n: u32) -> String {
-    match orig.rfind('.') {
-        Some(i) if i > 0 => format!("{} ({n}){}", &orig[..i], &orig[i..]),
-        _ => format!("{orig} ({n})"),
-    }
 }
 
 /// open a path with the OS default handler (file: associated app; folder: Explorer).

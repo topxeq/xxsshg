@@ -167,6 +167,7 @@ Config: ~/.xxssh (servers.json / settings.json / gui.json)", "轻量级图形 SS
     ("sftp_skip", "Skip", "跳过", "跳過"),
     ("sftp_ovw_all", "Overwrite all", "全部覆盖", "全部覆蓋"),
     ("sftp_skip_all", "Skip all", "全部跳过", "全部跳過"),
+    ("sftp_rename_all", "Rename all", "全部重命名", "全部重新命名"),
     ("hk_new_cmd", "New CMD hotkey", "新建CMD热键", "新建CMD熱鍵"),
     ("s_font_default", "Default (system)", "默认（跟随系统）", "預設（跟隨系統）"),
     ("bell_mute", "Mute", "静音", "靜音"),
