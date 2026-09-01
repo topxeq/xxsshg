@@ -44,6 +44,8 @@ enum Tab {
         result_rx: oneshot::Receiver<Result<SessionHandle, ConnectError>>,
         request_rx: mpsc::UnboundedReceiver<ConnectRequest>,
         status: String,
+        /// kept so a closed session tab can offer one-click reconnect
+        server: Server,
     },
     Open {
         name: String,
@@ -55,6 +57,8 @@ enum Tab {
         resize_sent: bool,
         closed: Option<String>,
         bell_flash: bool,
+        /// None for local shells (no reconnect possible)
+        server: Option<Server>,
     },
     Failed {
         name: String,
@@ -331,14 +335,50 @@ impl XxsshgApp {
         );
         log::info!("connect_server: spawning");
         let (cols, rows) = self.last_grid;
-        let (result_rx, request_rx) = session::spawn_connect(&self.rt, server, opts, cols, rows);
+        let (result_rx, request_rx) = session::spawn_connect(&self.rt, server.clone(), opts, cols, rows);
         self.tabs.push(Tab::Connecting {
             name,
             result_rx,
             request_rx,
             status,
+            server,
         });
         self.active_tab = self.tabs.len() - 1;
+    }
+
+    /// Reconnect a closed SSH tab in place (local shells have no server → no-op)
+    fn reconnect_tab(&mut self, idx: usize) {
+        let server = match self.tabs.get(idx) {
+            Some(Tab::Open { server: Some(s), .. }) => s.clone(),
+            _ => return,
+        };
+        let mut opts = resolve_opts(&server, &self.settings);
+        if std::env::var("XXSSHG_AUTOCONNECT").is_ok() {
+            opts.known_hosts_add = Some(
+                dirs::home_dir()
+                    .unwrap_or_default()
+                    .join(".xxssh")
+                    .join("known_hosts")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+        let name = server.name.clone();
+        let status = tpl(
+            tr(self.lang(), "status_connecting"),
+            &[("host", &server.host), ("port", &server.port.to_string())],
+        );
+        log::info!("reconnect_tab: respawning '{}'", server.name);
+        let (cols, rows) = self.last_grid;
+        let (result_rx, request_rx) = session::spawn_connect(&self.rt, server.clone(), opts, cols, rows);
+        self.tabs[idx] = Tab::Connecting {
+            name,
+            result_rx,
+            request_rx,
+            status,
+            server,
+        };
+        self.active_tab = idx;
     }
 
     /// Open a local shell (CMD / PowerShell / $SHELL) in a new tab
@@ -363,6 +403,7 @@ impl XxsshgApp {
                     resize_sent: false,
                     closed: None,
                     bell_flash: false,
+                    server: None,
                 });
                 self.active_tab = self.tabs.len() - 1;
             }
@@ -458,14 +499,14 @@ impl XxsshgApp {
         }
 
         // 2. Connect results
-        let mut connect_results: Vec<(usize, String, Result<SessionHandle, ConnectError>, bool)> =
+        let mut connect_results: Vec<(usize, String, Result<SessionHandle, ConnectError>, bool, Server)> =
             Vec::new();
         for i in 0..self.tabs.len() {
-            if let Tab::Connecting { result_rx, name, .. } = &mut self.tabs[i] {
+            if let Tab::Connecting { result_rx, name, server, .. } = &mut self.tabs[i] {
                 match result_rx.try_recv() {
                     Ok(res) => {
                         log::info!("connect result: ok={}", res.is_ok());
-                        connect_results.push((i, name.clone(), res, false));
+                        connect_results.push((i, name.clone(), res, false, server.clone()));
                     }
                     Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
                         log::error!("connect task died without a result (panic?)");
@@ -474,6 +515,7 @@ impl XxsshgApp {
                             name.clone(),
                             Err(ConnectError::Other("connect task crashed (see log)".into())),
                             true,
+                            server.clone(),
                         ));
                     }
                     Err(_) => {}
@@ -481,7 +523,7 @@ impl XxsshgApp {
             }
         }
         // apply in reverse so indices stay valid
-        for (i, name, res, _) in connect_results.into_iter().rev() {
+        for (i, name, res, _, server) in connect_results.into_iter().rev() {
             match res {
                 Ok(handle) => {
                     let input_tx = handle.input_tx.clone();
@@ -496,6 +538,7 @@ impl XxsshgApp {
                         resize_sent: false,
                         closed: None,
                         bell_flash: false,
+                        server: Some(server),
                     };
                 }
                 Err(e) => {
@@ -556,6 +599,7 @@ impl XxsshgApp {
                     term.bell = true;
                 }
                 if let Some(SessionEvent::Closed { exit_code, reason }) = handle.event_rx.try_recv().ok() {
+                    log::info!("session closed: {reason} (exit {exit_code:?})");
                     *closed = Some(match exit_code {
                         Some(c) => format!("{reason} (exit {c})"),
                         None => reason,
@@ -796,6 +840,7 @@ impl XxsshgApp {
         }
         self.active_tab = self.active_tab.min(self.tabs.len() - 1);
         let i = self.active_tab;
+        let mut do_reconnect = false;
         match &mut self.tabs[i] {
             Tab::Connecting { status, .. } => {
                 ui.centered_and_justified(|ui| {
@@ -818,36 +863,49 @@ impl XxsshgApp {
                     ui.spinner();
                 });
             }
-            Tab::Open { term, handle, resize_sent, closed, bell_flash, .. } => {
+            Tab::Open { term, handle, resize_sent, closed, bell_flash, server, .. } => {
                 if let Some(reason) = closed.clone() {
+                    let can_reconnect = server.is_some();
                     ui.centered_and_justified(|ui| {
-                        ui.label(tpl(tr(self.lang(), "status_closed"), &[("reason", &reason)]));
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(48.0);
+                            ui.label(tpl(tr(self.lang(), "status_closed"), &[("reason", &reason)]));
+                            ui.add_space(10.0);
+                            if can_reconnect
+                                && ui.button(tpl(tr(self.lang(), "btn_reconnect"), &[])).clicked()
+                            {
+                                do_reconnect = true;
+                            }
+                        });
                     });
-                    return;
-                }
-                term.hotkey_close = crate::gconfig::parse_hotkey(&self.gcfg.hotkey_close_tab);
-                term.hotkey_new = crate::gconfig::parse_hotkey(&self.gcfg.hotkey_new_cmd);
-                let resized = term.paint(ui, self.gcfg.font_size, self.gcfg.copy_on_select, self.gcfg.invert_scrolling);
-                if let Some(zoom) = term.pending_zoom.take() {
-                    if zoom.is_nan() {
-                        self.gcfg.font_size = 14.0;
-                    } else {
-                        self.gcfg.font_size = (self.gcfg.font_size + 2.0 * zoom).clamp(9.0, 28.0);
+                } else {
+                    term.hotkey_close = crate::gconfig::parse_hotkey(&self.gcfg.hotkey_close_tab);
+                    term.hotkey_new = crate::gconfig::parse_hotkey(&self.gcfg.hotkey_new_cmd);
+                    let resized = term.paint(ui, self.gcfg.font_size, self.gcfg.copy_on_select, self.gcfg.invert_scrolling);
+                    if let Some(zoom) = term.pending_zoom.take() {
+                        if zoom.is_nan() {
+                            self.gcfg.font_size = 14.0;
+                        } else {
+                            self.gcfg.font_size = (self.gcfg.font_size + 2.0 * zoom).clamp(9.0, 28.0);
+                        }
+                        let _ = crate::gconfig::save(&self.gui_path, &self.gcfg);
                     }
-                    let _ = crate::gconfig::save(&self.gui_path, &self.gcfg);
-                }
-                if resized || !*resize_sent {
-                    let (cols, rows) = term.grid_size();
-                    let _ = handle.resize_tx.send((cols, rows));
-                    *resize_sent = true;
-                }
-                if *bell_flash {
-                    *bell_flash = false;
-                    if self.gcfg.bell == BellMode::Flash {
-                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
+                    if resized || !*resize_sent {
+                        let (cols, rows) = term.grid_size();
+                        let _ = handle.resize_tx.send((cols, rows));
+                        *resize_sent = true;
+                    }
+                    if *bell_flash {
+                        *bell_flash = false;
+                        if self.gcfg.bell == BellMode::Flash {
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
+                        }
                     }
                 }
             }
+        }
+        if do_reconnect {
+            self.reconnect_tab(i);
         }
     }
 
