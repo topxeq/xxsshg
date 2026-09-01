@@ -1225,10 +1225,20 @@ impl SftpTab {
                     let r = ui.add(
                         egui::TextEdit::singleline(&mut self.confirm_input).desired_width(260.0),
                     );
-                    if self.confirm_input.is_empty() && !self.confirm_input_focus_done {
+                    if !self.confirm_input_focus_done {
                         r.request_focus();
                         self.confirm_input_focus_done = true;
                     }
+                    // Enter in the field confirms (singleline loses focus on Enter)
+                    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        ok = true;
+                    }
+                } else if ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                    // delete confirmations: Enter = OK
+                    ok = true;
+                }
+                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                    cancel = true;
                 }
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
@@ -1242,6 +1252,7 @@ impl SftpTab {
             });
         if cancel || !open {
             self.confirm = None;
+            self.confirm_input_focus_done = false;
         } else if ok {
             let name = target.clone();
             let input = self.confirm_input.clone();
