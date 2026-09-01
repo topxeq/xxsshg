@@ -30,8 +30,9 @@ pub enum OpMsg {
     Error(String),
     TransferDone { id: u64, err: Option<String>, refresh_remote: bool, refresh_local: bool },
     RemoteDirSet(String),
-    /// append rows to the properties window with matching id (async dir-size results)
-    PropsAppend { id: u64, rows: Vec<(String, String)> },
+    /// append rows to the properties window with matching id (async dir-size results);
+    /// `done` clears the "calculating" spinner (dir sizes append in two steps)
+    PropsAppend { id: u64, rows: Vec<(String, String)>, done: bool },
     /// remote file fetched into a temp file: open with system app or in the text viewer
     TempReady { name: String, path: Option<PathBuf>, open: bool, err: Option<String> },
     /// local listing changed (background delete finished)
@@ -208,12 +209,12 @@ impl SftpTab {
             let g = sftp.lock().await;
             let mut start = start;
             if resolve_cwd {
-                // resolve home first and list THAT path so the address bar
-                // shows an absolute dir instead of "."
-                match g.canonicalize(".").await {
-                    Ok(cwd) => {
-                        let _ = tx.send(OpMsg::RemoteDirSet(cwd.clone()));
-                        start = cwd;
+                // resolve the REQUESTED path (e.g. "." on first listing,
+                // "<dir>/.." for Up) so the address bar shows an absolute dir
+                match g.canonicalize(&start).await {
+                    Ok(resolved) => {
+                        let _ = tx.send(OpMsg::RemoteDirSet(resolved.clone()));
+                        start = resolved;
                     }
                     Err(e) => {
                         let _ = tx.send(OpMsg::Error(e.to_string()));
@@ -280,11 +281,13 @@ impl SftpTab {
                     refresh_remote |= rr;
                     refresh_local |= rl;
                 }
-                OpMsg::PropsAppend { id, rows } => {
+                OpMsg::PropsAppend { id, rows, done } => {
                     if let Some(p) = &mut self.props {
                         if p.id == id {
                             p.rows.extend(rows);
-                            p.pending = false;
+                            if done {
+                                p.pending = false;
+                            }
                         }
                     }
                 }
@@ -601,6 +604,7 @@ impl SftpTab {
                 let (files, bytes) = sftp::count_local_bytes(&path);
                 let _ = tx.send(OpMsg::PropsAppend {
                     id,
+                    done: true,
                     rows: vec![
                         (tr(lang, "props_size").to_string(), format!("{} ({})", sftp::fmt_size_pub(bytes), bytes)),
                         (tr(lang, "props_files").to_string(), format!("{files}")),
@@ -668,11 +672,12 @@ impl SftpTab {
                         .unwrap_or_else(|| "-".into());
                     rows.push((tr(lang, "props_owner").to_string(), owner));
                     rows.push((tr(lang, "props_group").to_string(), group));
-                    let _ = tx.send(OpMsg::PropsAppend { id, rows });
+                    let _ = tx.send(OpMsg::PropsAppend { id, rows, done: !is_dir });
                     if is_dir {
                         let (files, bytes) = sftp::count_remote_bytes(&g, &path).await;
                         let _ = tx.send(OpMsg::PropsAppend {
                             id,
+                            done: true,
                             rows: vec![
                                 (
                                     tr(lang, "props_size").to_string(),
@@ -685,7 +690,7 @@ impl SftpTab {
                 }
                 Err(e) => {
                     let _ = tx.send(OpMsg::Error(e.to_string()));
-                    let _ = tx.send(OpMsg::PropsAppend { id, rows: vec![] });
+                    let _ = tx.send(OpMsg::PropsAppend { id, rows: vec![], done: true });
                 }
             }
         });
@@ -703,7 +708,8 @@ impl SftpTab {
             return;
         };
         if !open && e.size > VIEW_DL_CAP {
-            self.error = Some(tpl(tr(self.lang, "view_dl_cap"), &[("mb", "16")]));
+            let mb = (VIEW_DL_CAP / 1024 / 1024).to_string();
+            self.error = Some(tpl(tr(self.lang, "view_dl_cap"), &[("mb", &mb)]));
             return;
         }
         let rpath = sftp::join_remote(&self.remote_dir, &name);
@@ -714,6 +720,17 @@ impl SftpTab {
         }
         let lpath = tmpdir.join(sanitize_temp_name(&name));
         let _ = std::fs::remove_file(&lpath);
+        // previous temp file may still be locked by the app it was opened with;
+        // fall back to a time-prefixed name (keeps the extension for association)
+        let lpath = if lpath.exists() {
+            let millis = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis())
+                .unwrap_or(0);
+            tmpdir.join(format!("{millis}-{}", sanitize_temp_name(&name)))
+        } else {
+            lpath
+        };
         let label = if open { "sftp_open" } else { "sftp_view" };
         let id = self.start_transfer(TransferKind::Download, format!("{} [{}]", name, tr(self.lang, label)), e.size);
         let sftp = self.sftp.clone();
@@ -1259,17 +1276,13 @@ fn valid_name(name: &str) -> bool {
         })
 }
 
-/// open a path with the OS default handler (file: associated app; folder: Explorer)
+/// open a path with the OS default handler (file: associated app; folder: Explorer).
+/// Uses explorer.exe directly on Windows — `cmd /C start` would let cmd metacharacters
+/// in (remote) file names be interpreted as command separators.
 fn open_with_system(path: &std::path::Path) -> std::io::Result<()> {
     #[cfg(target_os = "windows")]
     {
-        use std::os::windows::process::CommandExt;
-        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-        std::process::Command::new("cmd")
-            .args(["/C", "start", ""])
-            .arg(path)
-            .creation_flags(CREATE_NO_WINDOW)
-            .spawn()?;
+        std::process::Command::new("explorer").arg(path).spawn()?;
         Ok(())
     }
     #[cfg(not(target_os = "windows"))]
