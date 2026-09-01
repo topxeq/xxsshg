@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use russh_sftp::client::SftpSession;
+use russh_sftp::protocol::OpenFlags;
 use tokio::sync::{mpsc, oneshot};
 
 use crate::i18n::{tpl, tr, Language};
@@ -47,8 +48,10 @@ enum ConfirmKind {
     LocalDeleteDir,
     RemoteRename,
     RemoteMkdir,
+    RemoteMkfile,
     LocalRename,
     LocalMkdir,
+    LocalMkfile,
 }
 
 /// text preview window (quick view)
@@ -537,6 +540,64 @@ impl SftpTab {
         self.refresh_local();
     }
 
+    /// create an empty local file; auto-suffixes Explorer-style ("name (2).ext")
+    /// instead of overwriting when the name is taken
+    fn op_create_local_file(&mut self, name: String) {
+        if !valid_name(&name) {
+            return;
+        }
+        let mut final_name = name.clone();
+        let mut n = 2;
+        while self.local_dir.join(&final_name).exists() {
+            final_name = suffixed_name(&name, n);
+            n += 1;
+            if n > 99 {
+                self.error = Some(name);
+                return;
+            }
+        }
+        if let Err(e) = std::fs::File::create(self.local_dir.join(&final_name)) {
+            self.error = Some(e.to_string());
+        }
+        self.refresh_local();
+    }
+
+    /// create an empty remote file via SFTP (CREATE|WRITE keeps existing content
+    /// if the name is taken — the suffix loop avoids that in the first place)
+    fn op_create_remote_file(&mut self, name: String) {
+        if !valid_name(&name) {
+            return;
+        }
+        let dir = self.remote_dir.clone();
+        let sftp = self.sftp.clone();
+        let tx = self.op_tx.clone();
+        self.rt.spawn(async move {
+            let g = sftp.lock().await;
+            let mut final_name = name.clone();
+            let mut n = 2;
+            while g.metadata(sftp::join_remote(&dir, &final_name)).await.is_ok() {
+                final_name = suffixed_name(&name, n);
+                n += 1;
+                if n > 99 {
+                    drop(g);
+                    let _ = tx.send(OpMsg::Error(name));
+                    return;
+                }
+            }
+            let path = sftp::join_remote(&dir, &final_name);
+            let r = g
+                .open_with_flags(&path, OpenFlags::CREATE | OpenFlags::WRITE)
+                .await
+                .map(drop)
+                .map_err(|e| e.to_string());
+            drop(g);
+            if let Err(e) = r {
+                let _ = tx.send(OpMsg::Error(e));
+            }
+        });
+        self.spawn_refresh_remote(None, false);
+    }
+
     // ---- context-menu actions ----
 
     /// open a local file/folder with the system default handler
@@ -782,6 +843,11 @@ impl SftpTab {
             self.props_local(name.clone());
         }
         ui.separator();
+        if ui.button(tpl(tr(lang, "sftp_new_file"), &[])).clicked() {
+            ui.close();
+            self.confirm_input = String::new();
+            self.confirm = Some((ConfirmKind::LocalMkfile, String::new()));
+        }
         if ui.button(tpl(tr(lang, "sftp_new_dir"), &[])).clicked() {
             ui.close();
             self.confirm_input = String::new();
@@ -828,6 +894,11 @@ impl SftpTab {
             self.props_remote(name.clone());
         }
         ui.separator();
+        if ui.button(tpl(tr(lang, "sftp_new_file"), &[])).clicked() {
+            ui.close();
+            self.confirm_input = String::new();
+            self.confirm = Some((ConfirmKind::RemoteMkfile, String::new()));
+        }
         if ui.button(tpl(tr(lang, "sftp_rename"), &[])).clicked() {
             ui.close();
             self.confirm_input = name.clone();
@@ -895,6 +966,10 @@ impl SftpTab {
 
                 // remote ops
                 ui.horizontal(|ui| {
+                    if ui.button(tpl(tr(self.lang, "sftp_new_file"), &[])).clicked() {
+                        self.confirm_input = String::new();
+                        self.confirm = Some((ConfirmKind::RemoteMkfile, String::new()));
+                    }
                     if ui.button(tpl(tr(self.lang, "sftp_new_dir"), &[])).clicked() {
                         self.confirm_input = String::new();
                         self.confirm = Some((ConfirmKind::RemoteMkdir, String::new()));
@@ -990,6 +1065,19 @@ impl SftpTab {
                 }
                 if ui.button(tpl(tr(self.lang, "sftp_refresh"), &[])).clicked() {
                     self.refresh_local();
+                }
+            });
+            ui.separator();
+
+            // local ops
+            ui.horizontal(|ui| {
+                if ui.button(tpl(tr(self.lang, "sftp_new_file"), &[])).clicked() {
+                    self.confirm_input = String::new();
+                    self.confirm = Some((ConfirmKind::LocalMkfile, String::new()));
+                }
+                if ui.button(tpl(tr(self.lang, "sftp_new_dir"), &[])).clicked() {
+                    self.confirm_input = String::new();
+                    self.confirm = Some((ConfirmKind::LocalMkdir, String::new()));
                 }
             });
             ui.separator();
@@ -1101,6 +1189,7 @@ impl SftpTab {
         let mut open = true;
         egui::Window::new(v.title.clone())
             .open(&mut open)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .default_width(720.0)
             .default_height(480.0)
             .show(ui, |ui| {
@@ -1133,6 +1222,7 @@ impl SftpTab {
         egui::Window::new(p.title)
             .id(egui::Id::new("sftp_props_win"))
             .open(&mut open)
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .resizable(false)
             .collapsible(false)
             .show(ui, |ui| {
@@ -1205,8 +1295,16 @@ impl SftpTab {
                 tpl(tr(lang, "sftp_new_name"), &[]),
                 true,
             ),
-            ConfirmKind::LocalMkdir => (
-                tpl(tr(lang, "sftp_new_dir"), &[]),
+            ConfirmKind::LocalMkdir | ConfirmKind::LocalMkfile => (
+                tpl(
+                    tr(lang, if kind == ConfirmKind::LocalMkdir { "sftp_new_dir" } else { "sftp_new_file" }),
+                    &[],
+                ),
+                tpl(tr(lang, "sftp_new_name"), &[]),
+                true,
+            ),
+            ConfirmKind::RemoteMkfile => (
+                tpl(tr(lang, "sftp_new_file"), &[]),
                 tpl(tr(lang, "sftp_new_name"), &[]),
                 true,
             ),
@@ -1265,8 +1363,10 @@ impl SftpTab {
                 ConfirmKind::LocalDeleteDir => self.op_delete_local(name, true),
                 ConfirmKind::RemoteRename => self.op_rename_remote(name, input),
                 ConfirmKind::RemoteMkdir => self.op_mkdir_remote(input),
+                ConfirmKind::RemoteMkfile => self.op_create_remote_file(input),
                 ConfirmKind::LocalRename => self.op_rename_local(name, input),
                 ConfirmKind::LocalMkdir => self.op_mkdir_local(input),
+                ConfirmKind::LocalMkfile => self.op_create_local_file(input),
             }
         }
     }
@@ -1285,6 +1385,14 @@ fn valid_name(name: &str) -> bool {
         && !name.chars().any(|c| {
             matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
         })
+}
+
+/// Explorer-style collision suffix: "report.doc" -> "report (2).doc"
+fn suffixed_name(orig: &str, n: u32) -> String {
+    match orig.rfind('.') {
+        Some(i) if i > 0 => format!("{} ({n}){}", &orig[..i], &orig[i..]),
+        _ => format!("{orig} ({n})"),
+    }
 }
 
 /// open a path with the OS default handler (file: associated app; folder: Explorer).

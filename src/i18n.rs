@@ -129,6 +129,7 @@ Config: ~/.xxssh (servers.json / settings.json / gui.json)", "轻量级图形 SS
     ("sftp_upload", "⬆ Upload", "⬆ 上传", "⬆ 上傳"),
     ("sftp_download", "⬇ Download", "⬇ 下载", "⬇ 下載"),
     ("sftp_new_dir", "New folder", "新建文件夹", "新增資料夾"),
+    ("sftp_new_file", "New file", "新建文件", "新增檔案"),
     ("sftp_rename", "Rename", "重命名", "重新命名"),
     ("sftp_delete", "Delete", "删除", "刪除"),
     ("sftp_transfers", "Transfers", "传输", "傳輸"),
