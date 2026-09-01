@@ -433,10 +433,12 @@ impl SftpTab {
         }
 
         // Remote pane on the right: a real panel so both panes always fit
+        // exact 50/50 split, re-applied every frame (persisted panel state
+        // would otherwise override the default)
+        let half = ui.available_width() * 0.5;
         egui::Panel::right(egui::Id::new("sftp_remote_pane"))
-            .resizable(true)
-            .default_size(ui.available_width() * 0.5)
-            .size_range(120.0..=ui.available_width() - 120.0)
+            .exact_size(half)
+            .resizable(false)
             .show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.label(egui::RichText::new(tpl(tr(self.lang, "sftp_remote"), &[])).strong());
