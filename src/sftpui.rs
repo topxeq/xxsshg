@@ -34,6 +34,8 @@ pub enum OpMsg {
     PropsAppend { id: u64, rows: Vec<(String, String)> },
     /// remote file fetched into a temp file: open with system app or in the text viewer
     TempReady { name: String, path: Option<PathBuf>, open: bool, err: Option<String> },
+    /// local listing changed (background delete finished)
+    LocalRefresh,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -162,6 +164,11 @@ impl SftpTab {
 
     pub fn refresh_local(&mut self) {
         let dir = self.local_dir.clone();
+        // keep the selection on the same file across refreshes
+        let prev_sel = self
+            .local_sel
+            .and_then(|i| self.local_entries.get(i))
+            .map(|e| e.name.clone());
         let mut entries: Vec<FileEntry> = Vec::new();
         if let Ok(rd) = std::fs::read_dir(&dir) {
             for e in rd.flatten() {
@@ -181,6 +188,7 @@ impl SftpTab {
             }
         }
         sftp::sort_entries(&mut entries);
+        self.local_sel = prev_sel.and_then(|n| entries.iter().position(|e| e.name == n));
         self.local_entries = entries;
         self.local_edit = dir.to_string_lossy().into_owned();
     }
@@ -197,13 +205,23 @@ impl SftpTab {
             .map(|d| d.to_string())
             .unwrap_or_else(|| self.remote_dir.clone());
         self.rt.spawn(async move {
+            let g = sftp.lock().await;
+            let mut start = start;
             if resolve_cwd {
-                if let Ok(cwd) = sftp.lock().await.canonicalize(".").await {
-                    let _ = tx.send(OpMsg::RemoteDirSet(cwd));
+                // resolve home first and list THAT path so the address bar
+                // shows an absolute dir instead of "."
+                match g.canonicalize(".").await {
+                    Ok(cwd) => {
+                        let _ = tx.send(OpMsg::RemoteDirSet(cwd.clone()));
+                        start = cwd;
+                    }
+                    Err(e) => {
+                        let _ = tx.send(OpMsg::Error(e.to_string()));
+                        return;
+                    }
                 }
             }
-            let guard = sftp.lock().await;
-            match crate::sftp::list_dir(&guard, &start).await {
+            match crate::sftp::list_dir(&g, &start).await {
                 Err(e) => {
                     let _ = tx.send(OpMsg::Error(e));
                 }
@@ -240,15 +258,19 @@ impl SftpTab {
                     self.remote_entries = entries;
                     self.remote_sel = None;
                     self.loading = false;
-                    refresh_remote = false;
+                    self.busy = false;
                 }
                 OpMsg::Error(e) => {
                     self.error = Some(e);
                     self.loading = false;
+                    self.busy = false;
                 }
                 OpMsg::RemoteDirSet(d) => {
                     self.remote_edit = d.clone();
                     self.remote_dir = d;
+                }
+                OpMsg::LocalRefresh => {
+                    self.refresh_local();
                 }
                 OpMsg::TransferDone { id, err, refresh_remote: rr, refresh_local: rl } => {
                     if let Some(t) = self.transfers.iter_mut().find(|t| t.id == id) {
@@ -268,7 +290,7 @@ impl SftpTab {
                 }
                 OpMsg::TempReady { name, path, open, err } => {
                     if let Some(e) = err {
-                        self.error = Some(tpl(tr(self.lang, "err_open_failed"), &[("name", &name), ("e", &e)]));
+                        self.error = Some(tpl(tr(self.lang, "sftp_fetch_fail"), &[("name", &name), ("e", &e)]));
                     } else if let Some(p) = path {
                         if open {
                             if let Err(e) = open_with_system(&p) {
@@ -321,6 +343,9 @@ impl SftpTab {
         let is_dir = e.is_dir;
         let lpath = self.local_dir.join(&lname);
         let rdir = self.remote_dir.clone();
+        // target includes the item's own name: file -> remote file path,
+        // dir -> remote folder created (merged if it already exists)
+        let rtarget = sftp::join_remote(&rdir, &lname);
         let sftp = self.sftp.clone();
         let tx = self.op_tx.clone();
         let id = self.start_transfer(
@@ -345,9 +370,9 @@ impl SftpTab {
             };
             let g = sftp.lock().await;
             let r = if is_dir {
-                sftp::upload_dir_recursive(&g, &lpath, &rdir, &prog).await
+                sftp::upload_dir_recursive(&g, &lpath, &rtarget, &prog).await
             } else {
-                sftp::upload_file(&g, &lpath, &rdir, total, &prog).await
+                sftp::upload_file(&g, &lpath, &rtarget, total, &prog).await
             };
             drop(g);
             let err = r.err();
@@ -370,6 +395,9 @@ impl SftpTab {
         let size = e.size;
         let rpath = sftp::join_remote(&self.remote_dir, &rname);
         let ldir = self.local_dir.clone();
+        // target includes the item's own name: file -> local file path,
+        // dir -> local folder recreated (merged if it already exists)
+        let ltarget = ldir.join(&rname);
         let sftp = self.sftp.clone();
         let tx = self.op_tx.clone();
         let id = self.start_transfer(
@@ -395,9 +423,9 @@ impl SftpTab {
             };
             let g = sftp.lock().await;
             let r = if is_dir {
-                sftp::download_dir_recursive(&g, &rpath, &ldir, &prog).await
+                sftp::download_dir_recursive(&g, &rpath, &ltarget, &prog).await
             } else {
-                sftp::download_file(&g, &rpath, &ldir, total, &prog).await
+                sftp::download_file(&g, &rpath, &ltarget, total, &prog).await
             };
             drop(g);
             let err = r.err();
@@ -414,23 +442,26 @@ impl SftpTab {
 
     /// SFTP ops: mkdir / rename / delete on remote; delete on local
     fn op_mkdir_remote(&mut self, name: String) {
+        if !valid_name(&name) {
+            return;
+        }
         let dir = self.remote_dir.clone();
         let sftp = self.sftp.clone();
         let tx = self.op_tx.clone();
-        self.busy = true;
         self.rt.spawn(async move {
             let path = sftp::join_remote(&dir, &name);
             let g = sftp.lock().await;
             if let Err(e) = sftp::mkdir_all(&g, &path).await {
                 let _ = tx.send(OpMsg::Error(e));
             }
-            drop(g);
-            let _ = tx.send(OpMsg::RemoteList { dir, entries: Vec::new() });
         });
         self.spawn_refresh_remote(None, false);
     }
 
     fn op_rename_remote(&mut self, from: String, to: String) {
+        if !valid_name(&to) {
+            return;
+        }
         let dir = self.remote_dir.clone();
         let sftp = self.sftp.clone();
         let tx = self.op_tx.clone();
@@ -466,18 +497,25 @@ impl SftpTab {
 
     fn op_delete_local(&mut self, name: String, dir: bool) {
         let path = self.local_dir.join(&name);
-        let r = if dir {
-            std::fs::remove_dir_all(&path)
-        } else {
-            std::fs::remove_file(&path)
-        };
-        if let Err(e) = r {
-            self.error = Some(e.to_string());
-        }
-        self.refresh_local();
+        let tx = self.op_tx.clone();
+        // background: removing a large tree must not block the UI thread
+        self.rt.spawn_blocking(move || {
+            let r = if dir {
+                std::fs::remove_dir_all(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            if let Err(e) = r {
+                let _ = tx.send(OpMsg::Error(e.to_string()));
+            }
+            let _ = tx.send(OpMsg::LocalRefresh);
+        });
     }
 
     fn op_rename_local(&mut self, from: String, to: String) {
+        if !valid_name(&to) {
+            return;
+        }
         let from = self.local_dir.join(&from);
         let to = self.local_dir.join(&to);
         if let Err(e) = std::fs::rename(&from, &to) {
@@ -487,6 +525,9 @@ impl SftpTab {
     }
 
     fn op_mkdir_local(&mut self, name: String) {
+        if !valid_name(&name) {
+            return;
+        }
         if let Err(e) = std::fs::create_dir(self.local_dir.join(&name)) {
             self.error = Some(e.to_string());
         }
@@ -920,7 +961,8 @@ impl SftpTab {
                         self.local_dir = d.clone();
                         self.refresh_local();
                     } else {
-                        self.error = Some(d.to_string_lossy().into_owned());
+                        let msg = format!("{} (not a directory)", d.display());
+                        self.error = Some(tpl(tr(self.lang, "err_open_failed"), &[("e", &msg)]));
                     }
                 }
                 if ui.button(tpl(tr(self.lang, "sftp_up"), &[])).clicked() {
@@ -1037,8 +1079,7 @@ impl SftpTab {
     }
 
     /// quick-view text window
-    fn viewer_ui(&mut self, ui: &mut egui::Ui) {
-        let Some(mut v) = self.viewer.take() else { return };
+    fn viewer_ui(&mut self, ui: &mut egui::Ui) {        let Some(mut v) = self.viewer.take() else { return };
         let lang = self.lang;
         let mut open = true;
         egui::Window::new(v.title.clone())
@@ -1201,6 +1242,21 @@ impl SftpTab {
             }
         }
     }
+
+    /// best-effort cleanup when the tab closes: drop fetched temp preview files
+    pub fn cleanup(&self) {
+        let _ = std::fs::remove_dir_all(std::env::temp_dir().join(TEMP_VIEW_DIR));
+    }
+}
+
+/// reject empty names and anything containing path separators / Windows-illegal chars
+fn valid_name(name: &str) -> bool {
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.chars().any(|c| {
+            matches!(c, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|')
+        })
 }
 
 /// open a path with the OS default handler (file: associated app; folder: Explorer)

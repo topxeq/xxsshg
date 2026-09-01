@@ -157,6 +157,7 @@ Config: ~/.xxssh (servers.json / settings.json / gui.json)", "轻量级图形 SS
     ("view_truncated", "Showing the first {cap} of {total}.", "仅显示前 {cap}（共 {total}）。", "僅顯示前 {cap}（共 {total}）。"),
     ("view_wrap", "Wrap", "自动换行", "自動換行"),
     ("view_dl_cap", "File too large for quick view (over {mb} MB); download it instead.", "文件过大，无法快速查看（超过 {mb} MB），请使用下载。", "檔案過大，無法快速檢視（超過 {mb} MB），請使用下載。"),
+    ("sftp_fetch_fail", "Failed to fetch \"{name}\": {e}", "获取「{name}」失败：{e}", "取得「{name}」失敗：{e}"),
     ("err_open_failed", "Failed to open: {e}", "打开失败：{e}", "開啟失敗：{e}"),
     ("hk_new_cmd", "New CMD hotkey", "新建CMD热键", "新建CMD熱鍵"),
     ("s_font_default", "Default (system)", "默认（跟随系统）", "預設（跟隨系統）"),

@@ -393,6 +393,7 @@ impl XxsshgApp {
                 let _ = handle.close_tx.send(());
             }
             Tab::Sftp { st, .. } => {
+                st.cleanup();
                 let _ = st.close_tx.send(());
             }
             _ => {}
@@ -401,7 +402,9 @@ impl XxsshgApp {
     }
 
     fn has_open_session(&self) -> bool {
-        self.tabs.iter().any(|t| matches!(t, Tab::Open { closed: None, .. }))
+        self.tabs
+            .iter()
+            .any(|t| matches!(t, Tab::Open { closed: None, .. } | Tab::Sftp { .. }))
     }
 
     // -- per-frame polling ---------------------------------------------------
@@ -1488,10 +1491,5 @@ impl eframe::App for XxsshgApp {
         });
 
         self.dialogs(ui);
-
-        // SFTP confirm windows (active sftp tab)
-        if let Some(Tab::Sftp { st }) = self.tabs.get_mut(self.active_tab) {
-            st.confirm_ui(ui);
-        }
     }
 }
