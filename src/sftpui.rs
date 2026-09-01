@@ -101,6 +101,11 @@ pub struct SftpTab {
     pub transfers: Vec<Transfer>,
     prog_rx: mpsc::UnboundedReceiver<(u64, u64, u64, Option<String>)>,
     prog_tx: mpsc::UnboundedSender<(u64, u64, u64, Option<String>)>,
+    /// transfer conflict questions (dest path -> UI answer)
+    ask_tx: mpsc::UnboundedSender<(String, oneshot::Sender<u8>)>,
+    ask_rx: mpsc::UnboundedReceiver<(String, oneshot::Sender<u8>)>,
+    /// conflict dialog currently shown (waits for a button press)
+    transfer_ask: Option<(String, oneshot::Sender<u8>)>,
     next_id: u64,
 
     confirm: Option<(ConfirmKind, String)>,
@@ -130,6 +135,7 @@ impl SftpTab {
     ) -> Self {
         let (op_tx, op_rx) = mpsc::unbounded_channel();
         let (prog_tx, prog_rx) = mpsc::unbounded_channel();
+        let (ask_tx, ask_rx) = mpsc::unbounded_channel();
         let mut st = Self {
             name,
             sftp: sftp.clone(),
@@ -151,6 +157,9 @@ impl SftpTab {
             transfers: Vec::new(),
             prog_rx,
             prog_tx,
+            ask_tx,
+            ask_rx,
+            transfer_ask: None,
             next_id: 1,
             confirm: None,
             confirm_input: String::new(),
@@ -315,6 +324,12 @@ impl SftpTab {
                 }
             }
         }
+        // show one conflict dialog at a time; the rest queue up
+        if self.transfer_ask.is_none() {
+            if let Ok(q) = self.ask_rx.try_recv() {
+                self.transfer_ask = Some(q);
+            }
+        }
         if refresh_remote {
             self.spawn_refresh_remote(None, false);
         }
@@ -361,6 +376,7 @@ impl SftpTab {
         );
         let prog_id = id;
         let prog_tx = self.prog_tx.clone();
+        let policy = sftp::ConflictPolicy::new(self.ask_tx.clone());
         self.rt.spawn(async move {
                 let total = if is_dir {
                 let (f, b) = sftp::count_local_bytes(&lpath);
@@ -376,9 +392,9 @@ impl SftpTab {
             };
             let g = sftp.lock().await;
             let r = if is_dir {
-                sftp::upload_dir_recursive(&g, &lpath, &rtarget, &prog).await
+                sftp::upload_dir_recursive(&g, &lpath, &rtarget, &prog, &policy).await
             } else {
-                sftp::upload_file(&g, &lpath, &rtarget, total, &prog).await
+                sftp::upload_file(&g, &lpath, &rtarget, total, &prog, &policy).await
             };
             drop(g);
             let err = r.err();
@@ -412,6 +428,7 @@ impl SftpTab {
             if is_dir { 0 } else { size },
         );
         let prog_tx = self.prog_tx.clone();
+        let policy = sftp::ConflictPolicy::new(self.ask_tx.clone());
         self.rt.spawn(async move {
             let total = if is_dir {
                 let g = sftp.lock().await;
@@ -429,9 +446,9 @@ impl SftpTab {
             };
             let g = sftp.lock().await;
             let r = if is_dir {
-                sftp::download_dir_recursive(&g, &rpath, &ltarget, &prog).await
+                sftp::download_dir_recursive(&g, &rpath, &ltarget, &prog, &policy).await
             } else {
-                sftp::download_file(&g, &rpath, &ltarget, total, &prog).await
+                sftp::download_file(&g, &rpath, &ltarget, total, &prog, &policy).await
             };
             drop(g);
             let err = r.err();
@@ -797,6 +814,7 @@ impl SftpTab {
         let sftp = self.sftp.clone();
         let tx = self.op_tx.clone();
         let prog_tx = self.prog_tx.clone();
+        let policy = sftp::ConflictPolicy::overwrite_all();
         self.rt.spawn(async move {
             let total = e.size;
             let _ = prog_tx.send((id, 0, total, None));
@@ -805,7 +823,7 @@ impl SftpTab {
                 let _ = prog_tx2.send((id, done.min(total), total, None));
             };
             let g = sftp.lock().await;
-            let r = sftp::download_file(&g, &rpath, &lpath, total, &prog).await;
+            let r = sftp::download_file(&g, &rpath, &lpath, total, &prog, &policy).await;
             drop(g);
             let err = r.err();
             let _ = prog_tx.send((id, total, total, err.clone()));
@@ -1179,8 +1197,48 @@ impl SftpTab {
 
         // confirm / prompt windows
         self.confirm_ui(ui);
+        self.transfer_ask_ui(ui);
         self.viewer_ui(ui);
         self.props_ui(ui);
+    }
+
+    /// transfer conflict dialog: the asking transfer task is blocked on the answer,
+    /// so the dialog must be answered (no close button); queued conflicts follow one by one
+    fn transfer_ask_ui(&mut self, ui: &mut egui::Ui) {
+        let Some((dest, resp)) = self.transfer_ask.take() else { return };
+        let lang = self.lang;
+        let mut choice: Option<u8> = None;
+        egui::Window::new(tpl(tr(lang, "sftp_conflict_title"), &[]))
+            .id(egui::Id::new("sftp_conflict_win"))
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .collapsible(false)
+            .resizable(false)
+            .show(ui, |ui| {
+                ui.label(tpl(tr(lang, "sftp_conflict_msg"), &[("dest", &dest)]));
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if ui.button(tpl(tr(lang, "sftp_ovw"), &[])).clicked() {
+                        choice = Some(sftp::ANSWER_OVERWRITE);
+                    }
+                    if ui.button(tpl(tr(lang, "sftp_skip"), &[])).clicked() {
+                        choice = Some(sftp::ANSWER_SKIP);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui.button(tpl(tr(lang, "sftp_ovw_all"), &[])).clicked() {
+                        choice = Some(sftp::ANSWER_OVERWRITE_ALL);
+                    }
+                    if ui.button(tpl(tr(lang, "sftp_skip_all"), &[])).clicked() {
+                        choice = Some(sftp::ANSWER_SKIP_ALL);
+                    }
+                });
+            });
+        match choice {
+            Some(c) => {
+                let _ = resp.send(c);
+            }
+            None => self.transfer_ask = Some((dest, resp)),
+        }
     }
 
     /// quick-view text window

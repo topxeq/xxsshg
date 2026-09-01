@@ -160,6 +160,13 @@ Config: ~/.xxssh (servers.json / settings.json / gui.json)", "轻量级图形 SS
     ("view_dl_cap", "File too large for quick view (over {mb} MB); download it instead.", "文件过大，无法快速查看（超过 {mb} MB），请使用下载。", "檔案過大，無法快速檢視（超過 {mb} MB），請使用下載。"),
     ("sftp_fetch_fail", "Failed to fetch \"{name}\": {e}", "获取「{name}」失败：{e}", "取得「{name}」失敗：{e}"),
     ("err_open_failed", "Failed to open: {e}", "打开失败：{e}", "開啟失敗：{e}"),
+    // ---- transfer conflict dialog ----
+    ("sftp_conflict_title", "File exists", "文件已存在", "檔案已存在"),
+    ("sftp_conflict_msg", "\"{dest}\" already exists.", "「{dest}」已存在。", "「{dest}」已存在。"),
+    ("sftp_ovw", "Overwrite", "覆盖", "覆蓋"),
+    ("sftp_skip", "Skip", "跳过", "跳過"),
+    ("sftp_ovw_all", "Overwrite all", "全部覆盖", "全部覆蓋"),
+    ("sftp_skip_all", "Skip all", "全部跳过", "全部跳過"),
     ("hk_new_cmd", "New CMD hotkey", "新建CMD热键", "新建CMD熱鍵"),
     ("s_font_default", "Default (system)", "默认（跟随系统）", "預設（跟隨系統）"),
     ("bell_mute", "Mute", "静音", "靜音"),

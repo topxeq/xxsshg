@@ -4,10 +4,64 @@
 
 use russh_sftp::protocol::OpenFlags;
 use std::path::Path;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::sync::{mpsc, oneshot};
 
 pub const BUF: usize = 64 * 1024;
+
+/// Answer codes sent by the UI for a conflict question
+pub const ANSWER_OVERWRITE: u8 = 1;
+pub const ANSWER_SKIP: u8 = 2;
+pub const ANSWER_OVERWRITE_ALL: u8 = 3;
+pub const ANSWER_SKIP_ALL: u8 = 4;
+
+/// Conflict policy for transfers (mirrors xxssh TUI's Overwrite enum):
+/// ask the UI on each conflict; sticky answers from 覆盖全部/跳过全部 are
+/// honored for the rest of the transfer. One policy per transfer operation.
+pub struct ConflictPolicy {
+    /// 0 = ask each, 1 = overwrite-all, 2 = skip-all
+    sticky: AtomicU8,
+    ask: mpsc::UnboundedSender<(String, oneshot::Sender<u8>)>,
+}
+
+impl ConflictPolicy {
+    pub fn new(ask: mpsc::UnboundedSender<(String, oneshot::Sender<u8>)>) -> Self {
+        Self { sticky: AtomicU8::new(0), ask }
+    }
+
+    /// policy that overwrites everything without asking (temp preview files)
+    pub fn overwrite_all() -> Self {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        Self { sticky: AtomicU8::new(1), ask: tx }
+    }
+
+    /// true = transfer over `dest`, false = skip this item
+    pub async fn decide(&self, dest: &str) -> bool {
+        match self.sticky.load(Ordering::Relaxed) {
+            1 => return true,
+            2 => return false,
+            _ => {}
+        }
+        let (tx, rx) = oneshot::channel();
+        if self.ask.send((dest.to_string(), tx)).is_err() {
+            return true; // UI gone: keep the old overwrite behavior
+        }
+        match rx.await {
+            Ok(ANSWER_OVERWRITE_ALL) => {
+                self.sticky.store(1, Ordering::Relaxed);
+                true
+            }
+            Ok(ANSWER_SKIP_ALL) => {
+                self.sticky.store(2, Ordering::Relaxed);
+                false
+            }
+            Ok(ANSWER_OVERWRITE) => true,
+            _ => false,
+        }
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct FileEntry {
@@ -102,13 +156,18 @@ pub async fn delete_recursive(
 }
 
 /// Download a single remote file with progress (done, total).
+/// If the local destination exists, `policy` decides overwrite vs skip.
 pub async fn download_file(
     sftp: &russh_sftp::client::SftpSession,
     remote: &str,
     local: &Path,
     total: u64,
     progress: &(dyn Fn(u64) + Send + Sync),
+    policy: &ConflictPolicy,
 ) -> Result<u64, String> {
+    if local.exists() && !policy.decide(&local.to_string_lossy()).await {
+        return Ok(0); // skipped
+    }
     let mut from = sftp.open(remote).await.map_err(|e| e.to_string())?;
     let mut to = std::fs::File::create(local).map_err(|e| e.to_string())?;
     let mut buf = vec![0u8; BUF];
@@ -127,13 +186,18 @@ pub async fn download_file(
 }
 
 /// Upload a single local file with progress (done, total).
+/// If the remote destination exists, `policy` decides overwrite vs skip.
 pub async fn upload_file(
     sftp: &russh_sftp::client::SftpSession,
     local: &Path,
     remote: &str,
     total: u64,
     progress: &(dyn Fn(u64) + Send + Sync),
+    policy: &ConflictPolicy,
 ) -> Result<u64, String> {
+    if sftp.metadata(remote).await.is_ok() && !policy.decide(remote).await {
+        return Ok(0); // skipped
+    }
     let mut from = std::fs::File::open(local).map_err(|e| e.to_string())?;
     let mut to = sftp
         .open_with_flags(remote, OpenFlags::CREATE | OpenFlags::WRITE | OpenFlags::TRUNCATE)
@@ -178,6 +242,7 @@ pub async fn upload_dir_recursive(
     local_dir: &Path,
     remote_dir: &str,
     progress: &(dyn Fn(u64) + Send + Sync),
+    policy: &ConflictPolicy,
 ) -> Result<u64, String> {
     let mut transferred = 0u64;
     mkdir_all(sftp, remote_dir).await?;
@@ -188,10 +253,11 @@ pub async fn upload_dir_recursive(
         let rpath = join_remote(remote_dir, &name);
         if ft.is_dir() {
             transferred +=
-                Box::pin(upload_dir_recursive(sftp, &e.path(), &rpath, progress)).await?;
+                Box::pin(upload_dir_recursive(sftp, &e.path(), &rpath, progress, policy)).await?;
         } else {
             let size = e.metadata().map(|m| m.len()).unwrap_or(0);
-            let done = upload_file(sftp, &e.path(), &rpath, size, progress).await?;
+            // upload_file consults the conflict policy when the dest exists
+            let done = upload_file(sftp, &e.path(), &rpath, size, progress, policy).await?;
             transferred += done;
             progress(transferred);
         }
@@ -204,6 +270,7 @@ pub async fn download_dir_recursive(
     remote_dir: &str,
     local_dir: &Path,
     progress: &(dyn Fn(u64) + Send + Sync),
+    policy: &ConflictPolicy,
 ) -> Result<u64, String> {
     let mut transferred = 0u64;
     std::fs::create_dir_all(local_dir).map_err(|e| e.to_string())?;
@@ -213,9 +280,10 @@ pub async fn download_dir_recursive(
         let lpath = local_dir.join(&e.name);
         if e.is_dir {
             transferred +=
-                Box::pin(download_dir_recursive(sftp, &rpath, &lpath, progress)).await?;
+                Box::pin(download_dir_recursive(sftp, &rpath, &lpath, progress, policy)).await?;
         } else {
-            let done = download_file(sftp, &rpath, &lpath, e.size, progress).await?;
+            // download_file consults the conflict policy when the dest exists
+            let done = download_file(sftp, &rpath, &lpath, e.size, progress, policy).await?;
             transferred += done;
             progress(transferred);
         }
