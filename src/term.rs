@@ -212,6 +212,13 @@ impl Terminal {
         diag_log(&format!("feed-done: cursor=({},{})", cp.line.0, cp.column.0));
     }
 
+    /// Clear screen + scrollback, display-side only (nothing reaches the PTY,
+    /// so a running program is unaffected) — the same sequences `clear` uses:
+    /// cursor home, erase viewport, erase scrollback.
+    pub fn clear_scrollback(&mut self) {
+        self.feed(b"\x1b[H\x1b[2J\x1b[3J");
+    }
+
     /// Resize the grid; returns true if the size actually changed
     pub fn resize(&mut self, cols: u16, rows: u16) -> bool {
         if cols == self.cols && rows == self.rows || cols == 0 || rows == 0 {
@@ -757,6 +764,12 @@ impl Terminal {
                         }
                         if self.hotkey_new == Some(m) {
                             self.pending_new_cmd = true;
+                            continue;
+                        }
+                        // Ctrl+Shift+K: clear screen + scrollback (Windows
+                        // Terminal convention; display-side only)
+                        if modifiers.ctrl && modifiers.shift && !modifiers.alt && key == egui::Key::K {
+                            self.clear_scrollback();
                             continue;
                         }
                         // Home/End scroll the local buffer to head/tail (user

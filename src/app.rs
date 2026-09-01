@@ -615,6 +615,14 @@ impl XxsshgApp {
                     let menu_btn = egui::Button::new("☰")
                         .min_size(egui::vec2(small_w, 26.0));
                     egui::containers::menu::MenuButton::from_button(menu_btn).ui(ui, |ui| {
+                        if ui.button(tpl(tr(lang, "menu_clear"), &[])).clicked() {
+                            if let Some(t) = self.tabs.get_mut(self.active_tab) {
+                                if let Tab::Open { term, .. } = t {
+                                    term.clear_scrollback();
+                                }
+                            }
+                            ui.close();
+                        }
                         if ui.button(tpl(tr(lang, "settings_title"), &[])).clicked() {
                             self.settings_open = true;
                             ui.close();
@@ -743,6 +751,7 @@ impl XxsshgApp {
         ui.horizontal_wrapped(|ui| {
             let mut activate: Option<usize> = None;
             let mut close: Option<usize> = None;
+            let mut clear: Option<usize> = None;
             for i in 0..self.tabs.len() {
                 let is_active = i == self.active_tab;
                 let title = self.tabs[i].name().to_string();
@@ -753,6 +762,10 @@ impl XxsshgApp {
                 // Right-click on a tab opens its close menu (no inline × button:
                 // it sat right next to the label and was easy to mis-hit)
                 resp.context_menu(|ui| {
+                    if ui.button(tpl(tr(self.lang(), "menu_clear"), &[])).clicked() {
+                        clear = Some(i);
+                        ui.close();
+                    }
                     if ui.button(tpl(tr(self.lang(), "btn_close_tab"), &[])).clicked() {
                         close = Some(i);
                         ui.close();
@@ -764,6 +777,11 @@ impl XxsshgApp {
             }
             if let Some(i) = close {
                 self.close_tab(i);
+            }
+            if let Some(i) = clear {
+                if let Some(Tab::Open { term, .. }) = self.tabs.get_mut(i) {
+                    term.clear_scrollback();
+                }
             }
         });
         ui.separator();

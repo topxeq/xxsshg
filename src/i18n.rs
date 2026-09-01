@@ -120,6 +120,7 @@ Config: ~/.xxssh (servers.json / settings.json / gui.json)", "轻量级图形 SS
     ("s_font", "Terminal font", "终端字体", "終端字體"),
     ("hk_close_tab", "Close tab hotkey", "关闭页签热键", "關閉頁籤熱鍵"),
     ("menu_sftp", "SFTP file manager", "SFTP 文件管理", "SFTP 檔案管理"),
+    ("menu_clear", "Clear buffer", "清空缓冲区", "清空緩衝區"),
     ("sftp_connecting", "Opening SFTP on {host}...", "正在打开 {host} 的 SFTP...", "正在開啟 {host} 的 SFTP..."),
     ("sftp_local", "Local", "本地", "本地"),
     ("sftp_remote", "Remote", "远程", "遠端"),
