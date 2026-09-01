@@ -719,10 +719,6 @@ impl XxsshgApp {
                         self.connect_server(i);
                         ui.close();
                     }
-                    if ui.button(tpl(tr(self.lang(), "menu_sftp"), &[])).clicked() {
-                        self.open_sftp_for(i);
-                        ui.close();
-                    }
                     if ui.button(tpl(tr(self.lang(), "btn_edit"), &[])).clicked() {
                         let srv = self.servers[i].clone();
                         self.form = Some(ServerForm::from_server(i, &srv));
@@ -731,6 +727,11 @@ impl XxsshgApp {
                     }
                     if ui.button(tpl(tr(self.lang(), "btn_delete"), &[])).clicked() {
                         self.delete_confirm = Some(i);
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button(tpl(tr(self.lang(), "menu_sftp"), &[])).clicked() {
+                        self.open_sftp_for(i);
                         ui.close();
                     }
                 });
