@@ -82,6 +82,8 @@ pub struct SftpTab {
     pub close_tx: oneshot::Sender<()>,
     pub rt: tokio::runtime::Handle,
     pub lang: Language,
+    /// server this tab is connected to (for tab-menu reconnect)
+    pub server: crate::xconfig::Server,
 
     pub local_dir: PathBuf,
     pub local_entries: Vec<FileEntry>,
@@ -132,6 +134,7 @@ impl SftpTab {
         rt: tokio::runtime::Handle,
         lang: Language,
         local_root: PathBuf,
+        server: crate::xconfig::Server,
     ) -> Self {
         let (op_tx, op_rx) = mpsc::unbounded_channel();
         let (prog_tx, prog_rx) = mpsc::unbounded_channel();
@@ -142,6 +145,7 @@ impl SftpTab {
             close_tx,
             rt,
             lang,
+            server,
             local_dir: local_root.clone(),
             local_entries: Vec::new(),
             local_sel: None,

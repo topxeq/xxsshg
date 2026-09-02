@@ -63,12 +63,15 @@ enum Tab {
     Failed {
         name: String,
         error: String,
+        /// kept so the tab menu can offer reconnect
+        server: Option<Server>,
     },
     SftpConnecting {
         name: String,
         result_rx: oneshot::Receiver<Result<crate::session::SftpClient, ConnectError>>,
         request_rx: mpsc::UnboundedReceiver<ConnectRequest>,
         status: String,
+        server: Server,
     },
     Sftp {
         st: Box<SftpTab>,
@@ -83,6 +86,17 @@ impl Tab {
             | Tab::Failed { name, .. } => name,
             Tab::Sftp { st } => &st.name,
             Tab::SftpConnecting { name, .. } => name,
+        }
+    }
+
+    /// server this tab belongs to, when a reconnect makes sense
+    /// (local shells have none; already-connecting tabs don't need one)
+    fn reconnect_server(&self) -> Option<&Server> {
+        match self {
+            Tab::Open { server: Some(s), .. } => Some(s),
+            Tab::Failed { server: Some(s), .. } => Some(s),
+            Tab::Sftp { st } => Some(&st.server),
+            _ => None,
         }
     }
 }
@@ -346,12 +360,40 @@ impl XxsshgApp {
         self.active_tab = self.tabs.len() - 1;
     }
 
-    /// Reconnect a closed SSH tab in place (local shells have no server → no-op)
+    /// Reconnect a remote tab in place (SSH terminal / SFTP / failed connect);
+    /// local shells have no server → no-op
     fn reconnect_tab(&mut self, idx: usize) {
         let server = match self.tabs.get(idx) {
             Some(Tab::Open { server: Some(s), .. }) => s.clone(),
+            Some(Tab::Failed { server: Some(s), .. }) => s.clone(),
+            Some(Tab::Sftp { st }) => st.server.clone(),
             _ => return,
         };
+        // SFTP tab: tear down the old session, respawn SftpConnecting in place
+        if matches!(self.tabs.get(idx), Some(Tab::Sftp { .. })) {
+            let old = std::mem::replace(
+                &mut self.tabs[idx],
+                Tab::Failed { name: String::new(), error: String::new(), server: None },
+            );
+            if let Tab::Sftp { st } = old {
+                st.cleanup();
+                let _ = st.close_tx.send(());
+            }
+            let name = format!("SFTP: {}", server.name);
+            let host = server.host.clone();
+            let opts = resolve_opts(&server, &self.settings);
+            let (result_rx, request_rx) =
+                crate::session::spawn_sftp(&self.rt, server.clone(), opts);
+            self.tabs[idx] = Tab::SftpConnecting {
+                name,
+                result_rx,
+                request_rx,
+                status: tpl(tr(self.lang(), "sftp_connecting"), &[("host", &host)]),
+                server,
+            };
+            self.active_tab = idx;
+            return;
+        }
         let mut opts = resolve_opts(&server, &self.settings);
         if std::env::var("XXSSHG_AUTOCONNECT").is_ok() {
             opts.known_hosts_add = Some(
@@ -417,12 +459,13 @@ impl XxsshgApp {
         let opts = resolve_opts(&server, &self.settings);
         let name = format!("SFTP: {}", server.name);
         let host = server.host.clone();
-        let (result_rx, request_rx) = crate::session::spawn_sftp(&self.rt, server, opts);
+        let (result_rx, request_rx) = crate::session::spawn_sftp(&self.rt, server.clone(), opts);
         self.tabs.push(Tab::SftpConnecting {
             name,
             result_rx,
             request_rx,
             status: tpl(tr(self.lang(), "sftp_connecting"), &[("host", &host)]),
+            server,
         });
         self.active_tab = self.tabs.len() - 1;
     }
@@ -543,32 +586,40 @@ impl XxsshgApp {
                 }
                 Err(e) => {
                     let msg = e.message(lang);
-                    self.tabs[i] = Tab::Failed { name, error: msg };
+                    self.tabs[i] = Tab::Failed { name, error: msg, server: Some(server) };
                 }
             }
         }
 
-        // 2b. SFTP connect results
+        // 2b. SFTP connect results (bounded borrow: try_recv first, then re-own)
         for i in 0..self.tabs.len() {
-            if let Tab::SftpConnecting { name, result_rx, .. } = &mut self.tabs[i] {
-                if let Ok(res) = result_rx.try_recv() {
-                    match res {
-                        Ok(client) => {
-                            let local_root = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
-                            let st = SftpTab::new(
-                                name.clone(),
-                                client.sftp,
-                                client.close_tx,
-                                self.rt.clone(),
-                                self.lang(),
-                                local_root,
-                            );
-                            self.tabs[i] = Tab::Sftp { st: Box::new(st) };
-                        }
-                        Err(e) => {
-                            let msg = e.message(lang);
-                            self.tabs[i] = Tab::Failed { name: name.clone(), error: msg };
-                        }
+            let res = if let Tab::SftpConnecting { result_rx, .. } = &mut self.tabs[i] {
+                result_rx.try_recv().ok()
+            } else {
+                None
+            };
+            if let Some(res) = res {
+                let (name, server) = match self.tabs.get(i) {
+                    Some(Tab::SftpConnecting { name, server, .. }) => (name.clone(), server.clone()),
+                    _ => continue,
+                };
+                match res {
+                    Ok(client) => {
+                        let local_root = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+                        let st = SftpTab::new(
+                            name,
+                            client.sftp,
+                            client.close_tx,
+                            self.rt.clone(),
+                            self.lang(),
+                            local_root,
+                            server,
+                        );
+                        self.tabs[i] = Tab::Sftp { st: Box::new(st) };
+                    }
+                    Err(e) => {
+                        let msg = e.message(lang);
+                        self.tabs[i] = Tab::Failed { name, error: msg, server: Some(server) };
                     }
                 }
             }
@@ -796,6 +847,7 @@ impl XxsshgApp {
             let mut activate: Option<usize> = None;
             let mut close: Option<usize> = None;
             let mut clear: Option<usize> = None;
+            let mut reconnect: Option<usize> = None;
             for i in 0..self.tabs.len() {
                 let is_active = i == self.active_tab;
                 let title = self.tabs[i].name().to_string();
@@ -803,10 +855,18 @@ impl XxsshgApp {
                 if resp.clicked() {
                     activate = Some(i);
                 }
-                // Right-click on a tab opens its close menu (no inline × button:
+                // Right-click on a tab opens its menu (no inline × button:
                 // it sat right next to the label and was easy to mis-hit)
                 resp.context_menu(|ui| {
-                    if ui.button(tpl(tr(self.lang(), "menu_clear"), &[])).clicked() {
+                    if self.tabs[i].reconnect_server().is_some()
+                        && ui.button(tpl(tr(self.lang(), "btn_reconnect"), &[])).clicked()
+                    {
+                        reconnect = Some(i);
+                        ui.close();
+                    }
+                    if matches!(self.tabs[i], Tab::Open { .. })
+                        && ui.button(tpl(tr(self.lang(), "menu_clear"), &[])).clicked()
+                    {
                         clear = Some(i);
                         ui.close();
                     }
@@ -826,6 +886,9 @@ impl XxsshgApp {
                 if let Some(Tab::Open { term, .. }) = self.tabs.get_mut(i) {
                     term.clear_scrollback();
                 }
+            }
+            if let Some(i) = reconnect {
+                self.reconnect_tab(i);
             }
         });
         ui.separator();
