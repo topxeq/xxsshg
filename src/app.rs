@@ -411,6 +411,7 @@ impl XxsshgApp {
             &[("host", &server.host), ("port", &server.port.to_string())],
         );
         log::info!("reconnect_tab: respawning '{}'", server.name);
+        crate::diag::log(&format!("reconnect requested: '{}'", server.name));
         let (cols, rows) = self.last_grid;
         let (result_rx, request_rx) = session::spawn_connect(&self.rt, server.clone(), opts, cols, rows);
         self.tabs[idx] = Tab::Connecting {
@@ -472,6 +473,7 @@ impl XxsshgApp {
 
     fn close_tab(&mut self, idx: usize) {
         let tab = self.tabs.remove(idx);
+        crate::diag::log(&format!("tab closed: {}", tab.name()));
         match tab {
             Tab::Open { handle, .. } => {
                 let _ = handle.close_tx.send(());

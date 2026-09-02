@@ -182,14 +182,15 @@ async fn connect_and_open(
     rows: u16,
     requests: mpsc::UnboundedSender<ConnectRequest>,
 ) -> Result<SessionHandle, ConnectError> {
-    let session = establish(server.clone(), opts, requests.clone()).await?;
-    open_pty_after_auth(session, &server, cols, rows).await
+    let (session, last_disconnect) = establish(server.clone(), opts, requests.clone()).await?;
+    open_pty_after_auth(session, &server, last_disconnect, cols, rows).await
 }
 
 /// Authenticated session -> PTY + shell + endpoints for a GUI terminal tab.
 async fn open_pty_after_auth(
     session: client::Handle<Handler>,
-    _server: &Server,
+    server: &Server,
+    last_disconnect: Arc<std::sync::Mutex<Option<String>>>,
     cols: u16,
     rows: u16,
 ) -> Result<SessionHandle, ConnectError> {
@@ -197,8 +198,7 @@ async fn open_pty_after_auth(
     let mut channel = session
         .channel_open_session()
         .await
-        .map_err(|e| ConnectError::Other(e.to_string()))?;
-    let modes: &[(Pty, u32)] = &[(Pty::OPOST, 1), (Pty::ONLCR, 1), (Pty::CS8, 1)];
+        .map_err(|e| ConnectError::Other(e.to_string()))?;    let modes: &[(Pty, u32)] = &[(Pty::OPOST, 1), (Pty::ONLCR, 1), (Pty::CS8, 1)];
     channel
         .request_pty(false, "xterm-256color", cols as u32, rows as u32, 0, 0, modes)
         .await
@@ -215,7 +215,11 @@ async fn open_pty_after_auth(
     let (event_tx, event_rx) = mpsc::unbounded_channel::<SessionEvent>();
     let (close_tx, mut close_rx) = oneshot::channel::<()>();
 
+    let host = server.host.clone();
+    let port = server.port;
     tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        let mut last_output = started;
         let mut exit_code: Option<u32> = None;
         let mut closed = false;
         let mut reason = String::from("eof");
@@ -243,7 +247,11 @@ async fn open_pty_after_auth(
                                 let head: String = data.iter().take(32).map(|&b| format!("{:02x} ", b)).collect();
                                 crate::term::diag_log(&format!("pty-in: {} bytes: {}", data.len(), head));
                             }
-                            if channel.data(&data[..]).await.is_err() {
+                            if let Err(e) = channel.data(&data[..]).await {
+                                crate::diag::log(&format!(
+                                    "[{}:{}] channel write failed: {e:?}",
+                                    host, port
+                                ));
                                 closed = true;
                                 reason = "write failed".into();
                             }
@@ -270,6 +278,7 @@ async fn open_pty_after_auth(
                 msg = channel.wait() => {
                     match msg {
                         Some(ChannelMsg::Data { data }) | Some(ChannelMsg::ExtendedData { data, .. }) => {
+                            last_output = std::time::Instant::now();
                             // Raw pass-through (ANSI intact). Bell filtering is a GUI policy.
                             if output_tx.send(data.to_vec()).is_err() {
                                 break; // GUI gone
@@ -301,6 +310,20 @@ async fn open_pty_after_auth(
                 break;
             }
         }
+        // forensics: what killed the session, and when was it last alive
+        {
+            let idle = last_output.elapsed();
+            let cause = last_disconnect.lock().ok().and_then(|s| s.clone());
+            crate::diag::log(&format!(
+                "[{}:{}] session end: reason='{}' cause={} uptime={}s idle={}s",
+                host,
+                port,
+                reason,
+                cause.as_deref().unwrap_or("(none captured)"),
+                started.elapsed().as_secs(),
+                idle.as_secs(),
+            ));
+        }
         let _ = event_tx.send(SessionEvent::Closed { exit_code, reason });
         let _ = session
             .disconnect(Disconnect::ByApplication, "session end", "en")
@@ -321,7 +344,7 @@ async fn establish(
     server: Server,
     opts: ConnectOpts,
     requests: mpsc::UnboundedSender<ConnectRequest>,
-) -> Result<client::Handle<Handler>, ConnectError> {
+) -> Result<(client::Handle<Handler>, Arc<std::sync::Mutex<Option<String>>>), ConnectError> {
     let limit = match opts.connect_timeout {
         Some(0) => None,
         Some(s) => Some(Duration::from_secs(s)),
@@ -406,8 +429,18 @@ async fn establish(
         requests: requests.clone(),
         approved: HashSet::new(),
         reject_reason: None,
+        last_disconnect: Arc::new(std::sync::Mutex::new(None)),
     };
+    let last_disconnect = handler.last_disconnect.clone();
 
+    crate::diag::log(&format!(
+        "[{}:{}] connecting{} (keepalive {:?} x{})",
+        server.host,
+        server.port,
+        if opts.proxy.is_some() { " via SOCKS5" } else { "" },
+        KEEPALIVE_INTERVAL,
+        KEEPALIVE_MAX,
+    ));
     let handshake = client::connect_stream(config, stream, handler);
     let mut session = match limit {
         Some(d) => match tokio::time::timeout(d, handshake).await {
@@ -440,7 +473,11 @@ async fn establish(
     }
 
     log::debug!("connect_and_open: auth ok, opening PTY+shell");
-    Ok(session)
+    crate::diag::log(&format!(
+        "[{}:{}] authenticated as {}",
+        server.host, server.port, server.username
+    ));
+    Ok((session, last_disconnect))
 }
 
 /// Authenticated session -> SFTP subsystem client for the file browser.
@@ -461,7 +498,8 @@ pub fn spawn_sftp(
     let (req_tx, req_rx) = mpsc::unbounded_channel();
     rt.spawn(async move {
         let res = async {
-            let session = establish(server.clone(), opts, req_tx.clone()).await?;
+            let (session, _last_disconnect) =
+                establish(server.clone(), opts, req_tx.clone()).await?;
             let channel = session
                 .channel_open_session()
                 .await
@@ -473,9 +511,14 @@ pub fn spawn_sftp(
             let sftp = russh_sftp::client::SftpSession::new(channel.into_stream())
                 .await
                 .map_err(|e| ConnectError::Other(e.to_string()))?;
+            crate::diag::log(&format!("[{}:{}] sftp subsystem ready", server.host, server.port));
             let (close_tx, close_rx) = oneshot::channel::<()>();
             tokio::spawn(async move {
                 let _ = close_rx.await;
+                crate::diag::log(&format!(
+                    "[{}:{}] sftp tab closed by user",
+                    server.host, server.port
+                ));
                 let _ = session
                     .disconnect(Disconnect::ByApplication, "sftp closed", "en")
                     .await;
@@ -646,10 +689,33 @@ struct Handler {
     approved: HashSet<String>,
     /// Human-readable rejection reason surfaced to the UI on failure
     reject_reason: Option<String>,
+    /// transport-level close reason (server DISCONNECT message or russh error
+    /// such as KeepaliveTimeout), captured by the `disconnected` hook below
+    last_disconnect: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl client::Handler for Handler {
     type Error = russh::Error;
+
+    async fn disconnected(
+        &mut self,
+        reason: client::DisconnectReason<Self::Error>,
+    ) -> Result<(), Self::Error> {
+        let detail = match &reason {
+            client::DisconnectReason::ReceivedDisconnect(info) => {
+                format!("server sent DISCONNECT #{:?}: {}", info.reason_code, info.message)
+            }
+            client::DisconnectReason::Error(e) => format!("transport error: {e:?}"),
+        };
+        crate::diag::log(&format!("[{}:{}] transport closed: {}", self.host, self.port, detail));
+        if let Ok(mut slot) = self.last_disconnect.lock() {
+            *slot = Some(detail);
+        }
+        match reason {
+            client::DisconnectReason::ReceivedDisconnect(_) => Ok(()),
+            client::DisconnectReason::Error(e) => Err(e),
+        }
+    }
 
     async fn check_server_key(&mut self, key: &ssh_key::PublicKey) -> Result<bool, Self::Error> {
         let fp = key
