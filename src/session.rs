@@ -446,15 +446,27 @@ async fn establish(
         Some(d) => match tokio::time::timeout(d, handshake).await {
             Ok(r) => r,
             Err(_) => {
+                crate::diag::log(&format!(
+                    "[{}:{}] handshake/auth timed out ({}s)",
+                    server.host,
+                    server.port,
+                    d.as_secs(),
+                ));
                 return Err(ConnectError::Timeout {
                     host: server.host.clone(),
-                    secs: limit.map(|x| x.as_secs()).unwrap_or(0),
-                })
+                    secs: d.as_secs(),
+                });
             }
         },
         None => handshake.await,
     }
-    .map_err(|e| ConnectError::Network(e.to_string()))?;
+    .map_err(|e| {
+        crate::diag::log(&format!(
+            "[{}:{}] handshake failed: {e}",
+            server.host, server.port
+        ));
+        ConnectError::Network(e.to_string())
+    })?;
 
     log::debug!("connect_and_open: handshake done, authenticating ({:?})", server.auth);
     // Authenticate
@@ -463,6 +475,7 @@ async fn establish(
         AuthMethod::Key => auth_key(&mut session, &server, &requests).await,
     };
     if let Err(e) = auth {
+        crate::diag::log(&format!("[{}:{}] auth failed: {e:?}", server.host, server.port));
         let _ = session
             .disconnect(Disconnect::ByApplication, "auth failed", "en")
             .await;
@@ -538,6 +551,7 @@ pub fn spawn_sftp(
 // Auth (logic copied from xxssh; prompts routed to the GUI)
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
 enum AuthErr {
     Cancelled,
     Failed(String),
