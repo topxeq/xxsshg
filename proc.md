@@ -16,6 +16,15 @@
   - ⚠️ 关键差异：GUI 与 TUI 同卡不同步发版，「全平台最高 isLatest」的选法会选中 TUI 的版本号 → 必须**先过滤 platform 含 windows+gui 的条目**再取最高（--update 冒烟测试当场抓到）
 - **拖拽选择自动滚动**：选择时鼠标越过上下边缘每帧滚 1~8 行（按超出距离），端点骑新边缘，可跨屏选择；alt-screen 跳过
 
+### 发布
+- v0.5.0 发布到仙缘渡 xxssh 卡 "Windows GUI"（publish-xxsshg-0.5.0.ps1，16.96 MB）；清理 0.4.0 条目
+- 自我更新闭环验证：发布后跑 `--update`，当前版本 ≥ 店内 GUI 最新 → 正确报 Already up to date
+
+### 已知问题 / 待办（v0.5.0 后）
+- **tk8（47.91.31.109:22）五连未认证**：独立问题待查——0.5.0 起握手/认证失败会写 session-debug.log，用户复现一次即可取因
+- 断线根因未定论：xhw 等 KeepaliveTimeout 时机器未睡眠、无网络切换事件，指向网卡节能/路由 NAT（应用侧已闭环：检测+一键重连）
+- `--update` 在 release（GUI 子系统）下无控制台输出，菜单对话框为主路径
+
 ## 2026-09-03 发布会话（v0.4.0）：重连 + 操作日志 + 断线诊断 + 新图标
 
 ### 功能（0.3.0 → 0.4.0）
@@ -140,4 +149,8 @@
 - 构建：cargo build --release；测试：cargo test；E2E：XXSSHG_E2E=1（SSH）/ XXSSHG_E2E=2（打字模拟）/ XXSSHG_LOCAL_E2E=1（本地终端）
 - 无头自动连接：XXSSHG_AUTOCONNECT=服务器名（TOFU 自动信任）
 - 发布：改 Cargo.toml 版本 → touch src/main.rs → build → powershell publish-xxsshg-X.Y.Z.ps1（xxssh 根目录）
+- ⚠️ 发布前必须关闭运行中的 xxsshg：exe 被占用时链接报 os error 5，**磁盘上仍是旧版**（已两次踩到）
 - 诊断：XXSSHG_DEBUG_CURSOR=1（光标覆盖层+日志 ~/.xxssh/cursor-debug.log）、XXSSHG_PTY_DUMP=文件（原始字节）
+- 会话诊断日志：~/.xxssh/session-debug.log（常开、UTC 时间戳；断线真因/uptime/idle/握手认证失败原因）
+- 自我更新：`xxsshg.exe --update`（console 流程）或 ☰ 菜单「检查更新」；`--update` 直打真实商店可当冒烟测试
+- 图标再生成：python assets/gen_icon.py（输出 xxssh-icon.png/.ico + preview*.png；调色/改字标改脚本常量）
