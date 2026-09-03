@@ -6,6 +6,16 @@
 
 ---
 
+## 2026-09-03 发布会话（v0.4.0）：重连 + 操作日志 + 断线诊断 + 新图标
+
+### 功能（0.3.0 → 0.4.0）
+- **传输同名冲突策略**：覆盖/跳过/重命名 + 全部粘性决策，逐项排队询问；Decision 枚举 + free_local/remote_name 找空名（与新建文件共用）；临时预览文件固定覆盖
+- **断线重连**：断线页「重新连接」按钮 + 页签右键菜单「重连」（SSH 终端含已断开/连接失败页签/SFTP 页签；本地终端不显示）；SftpTab/Failed/SftpConnecting 携带 Server 原地重开
+- **SFTP 操作日志框**：底部面板（进行中传输进度条 + ✓/✗ 结果行，stick_to_bottom 自动滚动）；引擎返回 TransferStats{files,bytes,skipped}，完成行含文件数/总量/耗时/同名跳过数；本地删除/重命名/新建与错误均入日志；完成传输行图标变 ✓
+- **断线诊断**：常开 ~/.xxssh/session-debug.log（连接里程碑/传输层关闭/会话终局 uptime+idle）；russh Handler::disconnected 钩子拿回丢失的真因（服务器 DISCONNECT 原因串、KeepaliveTimeout）；握手超时/握手错误/认证失败全落盘。实测结论：xhw 等两条会话 idle≈uptime 后 KeepaliveTimeout——服务器未踢、机器未睡眠，指向本机网络路径（未定论）；tk8 五连未认证（独立问题待查）
+- **新图标**：终端窗口 + `>SSH` 字标（assets/gen_icon.py，Pillow 生成）；winit 单图喂 16px 标题栏+任务栏 → PNG 用无字简化形（矢量 chevron+光标），ICO 按尺寸分流（≥64 全设计，≤48 简化形）
+- 服务器右键菜单：「SFTP 文件管理」移到最下（分隔线隔开）
+
 ## 2026-09-01 开发+发布会话（v0.3.0）：SFTP 文件管理器成熟化
 
 ### 本会话功能（0.2.0 → 0.3.0）
