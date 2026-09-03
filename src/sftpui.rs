@@ -24,20 +24,27 @@ pub struct Transfer {
     pub done: u64,
     pub err: Option<String>,
     pub finished: bool,
+    pub started: std::time::Instant,
 }
 
 pub enum OpMsg {
     RemoteList { dir: String, entries: Vec<FileEntry> },
     Error(String),
-    TransferDone { id: u64, err: Option<String>, refresh_remote: bool, refresh_local: bool },
+    TransferDone {
+        id: u64,
+        err: Option<String>,
+        stats: Option<sftp::TransferStats>,
+        refresh_remote: bool,
+        refresh_local: bool,
+    },
     RemoteDirSet(String),
     /// append rows to the properties window with matching id (async dir-size results);
-    /// `done` clears the "calculating" spinner (dir sizes append in two steps)
+    /// `done` clears the "calculating" spinner (dir props arrive in two steps)
     PropsAppend { id: u64, rows: Vec<(String, String)>, done: bool },
     /// remote file fetched into a temp file: open with system app or in the text viewer
     TempReady { name: String, path: Option<PathBuf>, open: bool, err: Option<String> },
-    /// local listing changed (background delete finished)
-    LocalRefresh,
+    /// local listing changed (background delete finished); carries the log line
+    LocalRefresh { log: Option<String> },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -103,6 +110,8 @@ pub struct SftpTab {
     pub transfers: Vec<Transfer>,
     prog_rx: mpsc::UnboundedReceiver<(u64, u64, u64, Option<String>)>,
     prog_tx: mpsc::UnboundedSender<(u64, u64, u64, Option<String>)>,
+    /// activity log lines (✓/✗ prefixed, capped, newest at the bottom)
+    pub oplog: Vec<String>,
     /// transfer conflict questions (dest path -> UI answer)
     ask_tx: mpsc::UnboundedSender<(String, oneshot::Sender<u8>)>,
     ask_rx: mpsc::UnboundedReceiver<(String, oneshot::Sender<u8>)>,
@@ -161,6 +170,7 @@ impl SftpTab {
             transfers: Vec::new(),
             prog_rx,
             prog_tx,
+            oplog: Vec::new(),
             ask_tx,
             ask_rx,
             transfer_ask: None,
@@ -278,7 +288,8 @@ impl SftpTab {
                     self.busy = false;
                 }
                 OpMsg::Error(e) => {
-                    self.error = Some(e);
+                    self.error = Some(e.clone());
+                    self.oplog_push(format!("✗ {}", e));
                     self.loading = false;
                     self.busy = false;
                 }
@@ -286,10 +297,15 @@ impl SftpTab {
                     self.remote_edit = d.clone();
                     self.remote_dir = d;
                 }
-                OpMsg::LocalRefresh => {
+                OpMsg::LocalRefresh { log } => {
                     self.refresh_local();
+                    if let Some(line) = log {
+                        self.oplog_push(line);
+                    }
                 }
-                OpMsg::TransferDone { id, err, refresh_remote: rr, refresh_local: rl } => {
+                OpMsg::TransferDone { id, err, stats, refresh_remote: rr, refresh_local: rl } => {
+                    let line = self.transfer_log_line(id, err.as_deref(), stats);
+                    self.oplog_push(line);
                     if let Some(t) = self.transfers.iter_mut().find(|t| t.id == id) {
                         t.err = err;
                         t.finished = true;
@@ -354,8 +370,52 @@ impl SftpTab {
             done: 0,
             err: None,
             finished: false,
+            started: std::time::Instant::now(),
         });
         id
+    }
+
+    /// append to the activity log, capping the buffer
+    fn oplog_push(&mut self, line: String) {
+        self.oplog.push(line);
+        if self.oplog.len() > 300 {
+            self.oplog.drain(..self.oplog.len() - 300);
+        }
+    }
+
+    /// human-readable result line for a finished transfer
+    fn transfer_log_line(
+        &self,
+        id: u64,
+        err: Option<&str>,
+        stats: Option<sftp::TransferStats>,
+    ) -> String {
+        let lang = self.lang;
+        let Some(t) = self.transfers.iter().find(|t| t.id == id) else {
+            return format!("✓ id={id}");
+        };
+        let secs = format!("{:.1}", t.started.elapsed().as_secs_f32());
+        let action = tr(lang, if t.kind == TransferKind::Upload { "act_upload" } else { "act_download" });
+        if let Some(e) = err {
+            return format!(
+                "✗ {}",
+                tpl(tr(lang, "sftp_log_failed"), &[("action", action), ("name", &t.name), ("err", e)])
+            );
+        }
+        let st = stats.unwrap_or_default();
+        let mut line = tpl(
+            tr(lang, if t.kind == TransferKind::Upload { "sftp_log_upload" } else { "sftp_log_download" }),
+            &[
+                ("name", t.name.as_str()),
+                ("files", &st.files.to_string()),
+                ("size", &sftp::fmt_size_pub(st.bytes)),
+                ("secs", &secs),
+            ],
+        );
+        if st.skipped > 0 {
+            line += &tpl(tr(lang, "sftp_log_skipped"), &[("n", &st.skipped.to_string())]);
+        }
+        format!("✓ {line}")
     }
 
 
@@ -401,11 +461,15 @@ impl SftpTab {
                 sftp::upload_file(&g, &lpath, &rtarget, total, &prog, &policy).await
             };
             drop(g);
-            let err = r.err();
+            let (err, stats) = match r {
+                Ok(s) => (None, Some(s)),
+                Err(e) => (Some(e), None),
+            };
             let _ = prog_tx.send((prog_id, total, total, err.clone()));
             let _ = tx.send(OpMsg::TransferDone {
                 id,
                 err,
+                stats,
                 refresh_remote: true,
                 refresh_local: false,
             });
@@ -455,11 +519,15 @@ impl SftpTab {
                 sftp::download_file(&g, &rpath, &ltarget, total, &prog, &policy).await
             };
             drop(g);
-            let err = r.err();
+            let (err, stats) = match r {
+                Ok(s) => (None, Some(s)),
+                Err(e) => (Some(e), None),
+            };
             let _ = prog_tx.send((id, total, total, err.clone()));
             let _ = tx.send(OpMsg::TransferDone {
                 id,
                 err,
+                stats,
                 refresh_remote: false,
                 refresh_local: true,
             });
@@ -525,6 +593,7 @@ impl SftpTab {
     fn op_delete_local(&mut self, name: String, dir: bool) {
         let path = self.local_dir.join(&name);
         let tx = self.op_tx.clone();
+        let lang = self.lang;
         // background: removing a large tree must not block the UI thread
         self.rt.spawn_blocking(move || {
             let r = if dir {
@@ -532,10 +601,19 @@ impl SftpTab {
             } else {
                 std::fs::remove_file(&path)
             };
-            if let Err(e) = r {
-                let _ = tx.send(OpMsg::Error(e.to_string()));
+            match r {
+                Ok(()) => {
+                    let _ = tx.send(OpMsg::LocalRefresh {
+                        log: Some(format!(
+                            "✓ {}",
+                            tpl(tr(lang, "sftp_log_deleted"), &[("name", &name)])
+                        )),
+                    });
+                }
+                Err(e) => {
+                    let _ = tx.send(OpMsg::Error(e.to_string()));
+                }
             }
-            let _ = tx.send(OpMsg::LocalRefresh);
         });
     }
 
@@ -543,10 +621,16 @@ impl SftpTab {
         if !valid_name(&to) {
             return;
         }
-        let from = self.local_dir.join(&from);
-        let to = self.local_dir.join(&to);
-        if let Err(e) = std::fs::rename(&from, &to) {
+        let from_path = self.local_dir.join(&from);
+        let to_path = self.local_dir.join(&to);
+        if let Err(e) = std::fs::rename(&from_path, &to_path) {
             self.error = Some(e.to_string());
+            self.oplog_push(format!("✗ {}", e));
+        } else {
+            self.oplog_push(format!(
+                "✓ {}",
+                tpl(tr(self.lang, "sftp_log_renamed"), &[("from", &from), ("to", &to)])
+            ));
         }
         self.refresh_local();
     }
@@ -557,6 +641,12 @@ impl SftpTab {
         }
         if let Err(e) = std::fs::create_dir(self.local_dir.join(&name)) {
             self.error = Some(e.to_string());
+            self.oplog_push(format!("✗ {}", e));
+        } else {
+            self.oplog_push(format!(
+                "✓ {}",
+                tpl(tr(self.lang, "sftp_log_created"), &[("name", &name)])
+            ));
         }
         self.refresh_local();
     }
@@ -570,6 +660,16 @@ impl SftpTab {
         let path = sftp::free_local_name(&self.local_dir.join(&name));
         if let Err(e) = std::fs::File::create(&path) {
             self.error = Some(e.to_string());
+            self.oplog_push(format!("✗ {}", e));
+        } else {
+            let actual = path
+                .file_name()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_else(|| name.clone());
+            self.oplog_push(format!(
+                "✓ {}",
+                tpl(tr(self.lang, "sftp_log_created"), &[("name", &actual)])
+            ));
         }
         self.refresh_local();
     }
@@ -810,11 +910,15 @@ impl SftpTab {
             let g = sftp.lock().await;
             let r = sftp::download_file(&g, &rpath, &lpath, total, &prog, &policy).await;
             drop(g);
-            let err = r.err();
+            let (err, stats) = match r {
+                Ok(s) => (None, Some(s)),
+                Err(e) => (Some(e), None),
+            };
             let _ = prog_tx.send((id, total, total, err.clone()));
             let _ = tx.send(OpMsg::TransferDone {
                 id,
                 err: err.clone(),
+                stats,
                 refresh_remote: false,
                 refresh_local: false,
             });
@@ -938,6 +1042,46 @@ impl SftpTab {
                 ui.label("...");
             });
         }
+
+        // Activity log at the bottom, spanning both panes; added BEFORE the
+        // right panel so it spans the full width (panels reserve in order)
+        let log_h = (ui.available_height() * 0.25).clamp(96.0, 200.0);
+        egui::Panel::bottom(egui::Id::new("sftp_oplog_pane"))
+            .exact_size(log_h)
+            .resizable(false)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(tpl(tr(self.lang, "sftp_oplog"), &[])).strong());
+                    if ui.small_button(tpl(tr(self.lang, "sftp_clear"), &[])).clicked() {
+                        self.transfers.retain(|t| !t.finished);
+                        self.oplog.clear();
+                    }
+                });
+                // active transfers with progress bars
+                if self.transfers.iter().any(|t| !t.finished) {
+                    egui::ScrollArea::vertical()
+                        .max_height(56.0)
+                        .id_salt("sftp_oplog_transfers")
+                        .show(ui, |ui| {
+                            for t in self.transfers.iter().filter(|t| !t.finished) {
+                                self.transfer_row(ui, t);
+                            }
+                        });
+                }
+                // finished transfers + operation lines, newest at the bottom
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .stick_to_bottom(true)
+                    .id_salt("sftp_oplog_lines")
+                    .show(ui, |ui| {
+                        for t in self.transfers.iter().filter(|t| t.finished) {
+                            self.transfer_row(ui, t);
+                        }
+                        for line in &self.oplog {
+                            ui.label(egui::RichText::new(line).monospace().small());
+                        }
+                    });
+            });
 
         // Remote pane on the right: a real panel so both panes always fit
         // exact 50/50 split, re-applied every frame (persisted panel state
@@ -1129,55 +1273,6 @@ impl SftpTab {
                         });
                     }
                 });
-
-            // transfers
-            if !self.transfers.is_empty() {
-                ui.separator();
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(tpl(tr(self.lang, "sftp_transfers"), &[])).strong());
-                    if ui.small_button(tpl(tr(self.lang, "sftp_clear"), &[])).clicked() {
-                        self.transfers.retain(|t| !t.finished);
-                    }
-                });
-                egui::ScrollArea::vertical()
-                    .max_height(96.0)
-                    .id_salt("sftp_transfers")
-                    .show(ui, |ui| {
-                        for t in &self.transfers {
-                            ui.horizontal(|ui| {
-                                let icon = if t.err.is_some() {
-                                    "⚠"
-                                } else {
-                                    match t.kind {
-                                        TransferKind::Upload => "⬆",
-                                        TransferKind::Download => "⬇",
-                                    }
-                                };
-                                ui.label(egui::RichText::new(icon).color(if t.err.is_some() {
-                                    egui::Color32::LIGHT_RED
-                                } else {
-                                    egui::Color32::LIGHT_GREEN
-                                }));
-                                let frac = if t.total > 0 { t.done as f32 / t.total as f32 } else { 1.0 };
-                                ui.add(
-                                    egui::ProgressBar::new(frac.clamp(0.0, 1.0))
-                                        .show_percentage()
-                                        .desired_height(14.0),
-                                );
-                                ui.label(
-                                    egui::RichText::new(format!(
-                                        "{} {}/{}",
-                                        t.name,
-                                        crate::sftp::fmt_size_pub(t.done),
-                                        crate::sftp::fmt_size_pub(t.total)
-                                    ))
-                                    .weak()
-                                    .small(),
-                                );
-                            });
-                        }
-                    });
-            }
         });
 
         // confirm / prompt windows
@@ -1185,6 +1280,42 @@ impl SftpTab {
         self.transfer_ask_ui(ui);
         self.viewer_ui(ui);
         self.props_ui(ui);
+    }
+
+    /// one transfers-list row (progress bar while running; ✓/⚠ result after)
+    fn transfer_row(&self, ui: &mut egui::Ui, t: &Transfer) {
+        ui.horizontal(|ui| {
+            let (icon, color) = if let Some(_e) = &t.err {
+                ("⚠", egui::Color32::LIGHT_RED)
+            } else if t.finished {
+                ("✓", egui::Color32::LIGHT_GREEN)
+            } else {
+                (
+                    match t.kind {
+                        TransferKind::Upload => "⬆",
+                        TransferKind::Download => "⬇",
+                    },
+                    egui::Color32::LIGHT_GREEN,
+                )
+            };
+            ui.label(egui::RichText::new(icon).color(color));
+            let frac = if t.total > 0 { t.done as f32 / t.total as f32 } else { 1.0 };
+            ui.add(
+                egui::ProgressBar::new(frac.clamp(0.0, 1.0))
+                    .show_percentage()
+                    .desired_height(14.0),
+            );
+            ui.label(
+                egui::RichText::new(format!(
+                    "{} {}/{}",
+                    t.name,
+                    crate::sftp::fmt_size_pub(t.done),
+                    crate::sftp::fmt_size_pub(t.total)
+                ))
+                .weak()
+                .small(),
+            );
+        });
     }
 
     /// transfer conflict dialog: the asking transfer task is blocked on the answer,

@@ -11,6 +11,30 @@ use tokio::sync::{mpsc, oneshot};
 
 pub const BUF: usize = 64 * 1024;
 
+/// Aggregate outcome of a transfer operation (reported in the activity log)
+#[derive(Debug, Default, Clone, Copy)]
+pub struct TransferStats {
+    pub files: u64,
+    pub bytes: u64,
+    pub skipped: u64,
+}
+
+impl TransferStats {
+    fn one_file(bytes: u64) -> Self {
+        Self { files: 1, bytes, skipped: 0 }
+    }
+
+    fn skipped() -> Self {
+        Self { files: 0, bytes: 0, skipped: 1 }
+    }
+
+    fn add(&mut self, o: &TransferStats) {
+        self.files += o.files;
+        self.bytes += o.bytes;
+        self.skipped += o.skipped;
+    }
+}
+
 /// Answer codes sent by the UI for a conflict question
 pub const ANSWER_OVERWRITE: u8 = 1;
 pub const ANSWER_SKIP: u8 = 2;
@@ -246,12 +270,12 @@ pub async fn download_file(
     total: u64,
     progress: &(dyn Fn(u64) + Send + Sync),
     policy: &ConflictPolicy,
-) -> Result<u64, String> {
+) -> Result<TransferStats, String> {
     let mut local = local.to_path_buf();
     if local.exists() {
         match policy.decide(&local.to_string_lossy()).await {
             Decision::Overwrite => {}
-            Decision::Skip => return Ok(0),
+            Decision::Skip => return Ok(TransferStats::skipped()),
             Decision::Rename => local = free_local_name(&local),
         }
     }
@@ -269,7 +293,7 @@ pub async fn download_file(
         progress(done.min(total));
     }
     let _ = to.sync_all();
-    Ok(done)
+    Ok(TransferStats::one_file(done))
 }
 
 /// Upload a single local file with progress (done, total).
@@ -281,12 +305,12 @@ pub async fn upload_file(
     total: u64,
     progress: &(dyn Fn(u64) + Send + Sync),
     policy: &ConflictPolicy,
-) -> Result<u64, String> {
+) -> Result<TransferStats, String> {
     let mut dest = remote.to_string();
     if sftp.metadata(&dest).await.is_ok() {
         match policy.decide(&dest).await {
             Decision::Overwrite => {}
-            Decision::Skip => return Ok(0),
+            Decision::Skip => return Ok(TransferStats::skipped()),
             Decision::Rename => dest = free_remote_name(sftp, &dest).await,
         }
     }
@@ -307,7 +331,7 @@ pub async fn upload_file(
         progress(done.min(total));
     }
     let _ = to.sync_all().await;
-    Ok(done)
+    Ok(TransferStats::one_file(done))
 }
 
 pub fn count_local_bytes(dir: &Path) -> (u64, u64) {
@@ -335,8 +359,8 @@ pub async fn upload_dir_recursive(
     remote_dir: &str,
     progress: &(dyn Fn(u64) + Send + Sync),
     policy: &ConflictPolicy,
-) -> Result<u64, String> {
-    let mut transferred = 0u64;
+) -> Result<TransferStats, String> {
+    let mut stats = TransferStats::default();
     mkdir_all(sftp, remote_dir).await?;
     let rd = std::fs::read_dir(local_dir).map_err(|e| e.to_string())?;
     for e in rd.flatten() {
@@ -344,17 +368,17 @@ pub async fn upload_dir_recursive(
         let name = e.file_name().to_string_lossy().into_owned();
         let rpath = join_remote(remote_dir, &name);
         if ft.is_dir() {
-            transferred +=
-                Box::pin(upload_dir_recursive(sftp, &e.path(), &rpath, progress, policy)).await?;
+            stats.add(
+                &Box::pin(upload_dir_recursive(sftp, &e.path(), &rpath, progress, policy)).await?,
+            );
         } else {
             let size = e.metadata().map(|m| m.len()).unwrap_or(0);
             // upload_file consults the conflict policy when the dest exists
-            let done = upload_file(sftp, &e.path(), &rpath, size, progress, policy).await?;
-            transferred += done;
-            progress(transferred);
+            stats.add(&upload_file(sftp, &e.path(), &rpath, size, progress, policy).await?);
+            progress(stats.bytes);
         }
     }
-    Ok(transferred)
+    Ok(stats)
 }
 
 pub async fn download_dir_recursive(
@@ -363,24 +387,24 @@ pub async fn download_dir_recursive(
     local_dir: &Path,
     progress: &(dyn Fn(u64) + Send + Sync),
     policy: &ConflictPolicy,
-) -> Result<u64, String> {
-    let mut transferred = 0u64;
+) -> Result<TransferStats, String> {
+    let mut stats = TransferStats::default();
     std::fs::create_dir_all(local_dir).map_err(|e| e.to_string())?;
     let entries = list_dir(sftp, remote_dir).await?;
     for e in entries {
         let rpath = join_remote(remote_dir, &e.name);
         let lpath = local_dir.join(&e.name);
         if e.is_dir {
-            transferred +=
-                Box::pin(download_dir_recursive(sftp, &rpath, &lpath, progress, policy)).await?;
+            stats.add(
+                &Box::pin(download_dir_recursive(sftp, &rpath, &lpath, progress, policy)).await?,
+            );
         } else {
             // download_file consults the conflict policy when the dest exists
-            let done = download_file(sftp, &rpath, &lpath, e.size, progress, policy).await?;
-            transferred += done;
-            progress(transferred);
+            stats.add(&download_file(sftp, &rpath, &lpath, e.size, progress, policy).await?);
+            progress(stats.bytes);
         }
     }
-    Ok(transferred)
+    Ok(stats)
 }
 
 pub async fn count_remote_bytes(
