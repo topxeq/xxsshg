@@ -597,6 +597,24 @@ impl Terminal {
             }
         } else if response.dragged() {
             if let (Some(anchor), Some(pos)) = (self.drag_anchor, response.interact_pointer_pos()) {
+                // Auto-scroll when the pointer moves past the top/bottom edge so
+                // a selection can span more than one screen: scroll a few lines
+                // per frame (faster the further out the pointer is) and let the
+                // moving endpoint ride the new edge via the updated offset.
+                let rect = response.rect;
+                let speed: i32 = if pos.y < rect.top() {
+                    ((rect.top() - pos.y) / self.cell_h).ceil() as i32
+                } else if pos.y > rect.bottom() {
+                    -(((pos.y - rect.bottom()) / self.cell_h).ceil() as i32)
+                } else {
+                    0
+                };
+                let speed = speed.clamp(-8, 8);
+                if speed != 0 && !self.term.mode().contains(TermMode::ALT_SCREEN) {
+                    // same direction convention as the wheel: +delta = older lines
+                    self.term.scroll_display(Scroll::Delta(speed));
+                    ui.ctx().request_repaint();
+                }
                 let cur = self.point_from_pos(pos, origin);
                 self.selection = Some((anchor, cur));
             }
