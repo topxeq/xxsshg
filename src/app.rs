@@ -229,6 +229,30 @@ enum Question {
     },
 }
 
+/// Self-update dialog state machine (driven by messages from worker threads)
+enum UpdateUi {
+    Closed,
+    Checking,
+    UpToDate { version: String },
+    Available { latest: String, url: String, sha256: String },
+    Downloading { latest: String, done: u64, total: u64 },
+    Done { version: String },
+    Failed { msg: String },
+}
+
+enum UpdateMsg {
+    Checked(Result<crate::update::UpdateCheck, String>),
+    Progress(u64, u64),
+    Installed(Result<(), String>),
+}
+
+enum UpdateAction {
+    Check,
+    Start,
+    Restart,
+    Cancel,
+}
+
 pub struct XxsshgApp {
     rt: tokio::runtime::Handle,
     /// Terminal monospace fonts available on this machine (labels)
@@ -255,6 +279,9 @@ pub struct XxsshgApp {
     question: Option<PendingQuestion>,
     settings_open: bool,
     about_open: bool,
+    /// self-update dialog
+    update_ui: UpdateUi,
+    update_rx: Option<std::sync::mpsc::Receiver<UpdateMsg>>,
     quit_confirm: bool,
     status_msg: Option<(String, std::time::Instant)>,
     autoconnect_done: bool,
@@ -297,6 +324,8 @@ impl XxsshgApp {
             question: None,
             settings_open: false,
             about_open: false,
+            update_ui: UpdateUi::Closed,
+            update_rx: None,
             quit_confirm: false,
             status_msg: None,
             autoconnect_done: false,
@@ -491,6 +520,184 @@ impl XxsshgApp {
         self.tabs
             .iter()
             .any(|t| matches!(t, Tab::Open { closed: None, .. } | Tab::Sftp { .. }))
+    }
+
+    // -- self-update ---------------------------------------------------------
+
+    fn start_update_check(&mut self) {
+        self.update_ui = UpdateUi::Checking;
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.update_rx = Some(rx);
+        std::thread::spawn(move || {
+            let msg = match crate::update::check() {
+                Ok(c) => UpdateMsg::Checked(Ok(c)),
+                Err(e) => UpdateMsg::Checked(Err(e)),
+            };
+            let _ = tx.send(msg);
+        });
+    }
+
+    fn start_update_download(&mut self, latest: String, url: String, sha256: String) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        self.update_rx = Some(rx);
+        std::thread::spawn(move || {
+            let progress_tx = tx.clone();
+            let progress = move |done: u64, total: u64| {
+                let _ = progress_tx.send(UpdateMsg::Progress(done, total));
+            };
+            let res = crate::update::download_and_install(&url, &sha256, &progress);
+            let _ = tx.send(UpdateMsg::Installed(res));
+        });
+        self.update_ui = UpdateUi::Downloading { latest, done: 0, total: 0 };
+    }
+
+    /// drain worker-thread messages into the dialog state
+    fn poll_update(&mut self) {
+        let Some(rx) = &self.update_rx else { return };
+        while let Ok(msg) = rx.try_recv() {
+            match msg {
+                UpdateMsg::Checked(Ok(crate::update::UpdateCheck::UpToDate { version, .. })) => {
+                    self.update_ui = UpdateUi::UpToDate { version };
+                }
+                UpdateMsg::Checked(Ok(crate::update::UpdateCheck::Available { latest, url, sha256 })) => {
+                    self.update_ui = UpdateUi::Available { latest, url, sha256 };
+                }
+                UpdateMsg::Checked(Err(e)) => {
+                    self.update_ui = UpdateUi::Failed { msg: e };
+                }
+                UpdateMsg::Progress(done, total) => {
+                    if let UpdateUi::Downloading { done: d, total: t, .. } = &mut self.update_ui {
+                        *d = done;
+                        *t = total;
+                    }
+                }
+                UpdateMsg::Installed(Ok(())) => {
+                    if let UpdateUi::Downloading { latest, .. } = &self.update_ui {
+                        let version = latest.clone();
+                        self.update_ui = UpdateUi::Done { version };
+                    }
+                }
+                UpdateMsg::Installed(Err(e)) => {
+                    self.update_ui = UpdateUi::Failed { msg: e };
+                }
+            }
+        }
+        // worker messages are finished in these states — drop the channel
+        if matches!(
+            self.update_ui,
+            UpdateUi::UpToDate { .. } | UpdateUi::Available { .. } | UpdateUi::Done { .. } | UpdateUi::Failed { .. }
+        ) {
+            self.update_rx = None;
+        }
+    }
+
+    /// the ☰ "Check for updates" window
+    fn update_dialog(&mut self, ui: &mut egui::Ui) {
+        self.poll_update();
+        if matches!(self.update_ui, UpdateUi::Closed) {
+            return;
+        }
+        let lang = self.lang();
+        let current = env!("CARGO_PKG_VERSION");
+        let mut open = !matches!(self.update_ui, UpdateUi::Downloading { .. });
+        let mut action: Option<UpdateAction> = None;
+        egui::Window::new(tpl(tr(lang, "update_title"), &[]))
+            .id(egui::Id::new("update_win"))
+            .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ui, |ui| {
+                match &self.update_ui {
+                    UpdateUi::Checking => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(tpl(tr(lang, "update_checking"), &[]));
+                        });
+                    }
+                    UpdateUi::UpToDate { version } => {
+                        ui.label(tpl(tr(lang, "update_uptodate"), &[("version", version)]));
+                    }
+                    UpdateUi::Available { latest, .. } => {
+                        ui.label(tpl(
+                            tr(lang, "update_available"),
+                            &[("latest", latest), ("current", current)],
+                        ));
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            if ui.button(tpl(tr(lang, "update_start"), &[])).clicked() {
+                                action = Some(UpdateAction::Start);
+                            }
+                            if ui.button(tpl(tr(lang, "btn_cancel"), &[])).clicked() {
+                                action = Some(UpdateAction::Cancel);
+                            }
+                        });
+                    }
+                    UpdateUi::Downloading { done, total, .. } => {
+                        ui.label(tpl(
+                            tr(lang, "update_downloading"),
+                            &[
+                                ("done", &format!("{:.1}", *done as f32 / 1048576.0)),
+                                ("total", &format!("{:.1}", *total as f32 / 1048576.0)),
+                            ],
+                        ));
+                        let frac = if *total > 0 { *done as f32 / *total as f32 } else { 0.0 };
+                        ui.add(egui::ProgressBar::new(frac.clamp(0.0, 1.0)).show_percentage());
+                        ui.ctx().request_repaint();
+                    }
+                    UpdateUi::Done { version } => {
+                        ui.label(tpl(tr(lang, "update_done"), &[("version", version)]));
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            if ui.button(tpl(tr(lang, "update_restart"), &[])).clicked() {
+                                action = Some(UpdateAction::Restart);
+                            }
+                            if ui.button(tpl(tr(lang, "update_later"), &[])).clicked() {
+                                action = Some(UpdateAction::Cancel);
+                            }
+                        });
+                    }
+                    UpdateUi::Failed { msg } => {
+                        ui.colored_label(
+                            egui::Color32::LIGHT_RED,
+                            tpl(tr(lang, "update_failed"), &[("err", msg)]),
+                        );
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            if ui.button(tpl(tr(lang, "btn_retry"), &[])).clicked() {
+                                action = Some(UpdateAction::Check);
+                            }
+                            if ui.button(tpl(tr(lang, "btn_cancel"), &[])).clicked() {
+                                action = Some(UpdateAction::Cancel);
+                            }
+                        });
+                    }
+                    UpdateUi::Closed => {}
+                }
+            });
+        // X button (hidden/disabled during a download)
+        if !open && !matches!(self.update_ui, UpdateUi::Downloading { .. }) {
+            action = Some(UpdateAction::Cancel);
+        }
+        let start = if let UpdateUi::Available { latest, url, sha256 } = &self.update_ui {
+            Some((latest.clone(), url.clone(), sha256.clone()))
+        } else {
+            None
+        };
+        match action {
+            Some(UpdateAction::Check) => self.start_update_check(),
+            Some(UpdateAction::Start) => {
+                if let Some((latest, url, sha256)) = start {
+                    self.start_update_download(latest, url, sha256);
+                }
+            }
+            Some(UpdateAction::Restart) => crate::update::restart(),
+            Some(UpdateAction::Cancel) => {
+                self.update_ui = UpdateUi::Closed;
+                self.update_rx = None;
+            }
+            None => {}
+        }
     }
 
     // -- per-frame polling ---------------------------------------------------
@@ -712,6 +919,10 @@ impl XxsshgApp {
                     let menu_btn = egui::Button::new("☰")
                         .min_size(egui::vec2(small_w, 26.0));
                     egui::containers::menu::MenuButton::from_button(menu_btn).ui(ui, |ui| {
+                        if ui.button(tpl(tr(lang, "update_title"), &[])).clicked() {
+                            self.start_update_check();
+                            ui.close();
+                        }
                         if ui.button(tpl(tr(lang, "menu_clear"), &[])).clicked() {
                             if let Some(t) = self.tabs.get_mut(self.active_tab) {
                                 if let Tab::Open { term, .. } = t {
@@ -1633,5 +1844,6 @@ impl eframe::App for XxsshgApp {
         });
 
         self.dialogs(ui);
+        self.update_dialog(ui);
     }
 }

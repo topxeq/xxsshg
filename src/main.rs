@@ -18,6 +18,7 @@ mod sftp;
 mod sftpui;
 mod term;
 mod txdef;
+mod update;
 mod xconfig;
 
 use app::XxsshgApp;
@@ -44,6 +45,14 @@ fn main() -> eframe::Result {
     let servers = xconfig::load(&servers_path);
     let settings = xconfig::load_settings(&settings_path);
     let gcfg = gconfig::load(&gui_path);
+
+    // --update: self-update from magicdo.top (console flow, parity with xxssh;
+    // GUI-subsystem builds run it without console output — the ☰ menu dialog
+    // is the primary path)
+    if args.iter().any(|a| a == "--update") {
+        update::run_cli(settings.language);
+        return Ok(());
+    }
 
     // Background tokio runtime for SSH sessions
     let rt = tokio::runtime::Builder::new_multi_thread()
