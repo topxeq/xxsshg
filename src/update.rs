@@ -106,7 +106,27 @@ pub fn download_and_install(
         current_exe().map_err(|e| format!("cannot determine exe path: {e}"))?;
     let new_path = exe_for_suffix(&exe_path, "new");
 
-    download(url, &new_path, progress)?;
+    // the store link can be slow or stall — retry before giving up, and never
+    // leave a partial .new behind (a 0-byte leftover is how a failed attempt
+    // was first diagnosed)
+    let mut last_err = String::new();
+    let mut downloaded = false;
+    for attempt in 1..=3 {
+        match download(url, &new_path, progress) {
+            Ok(()) => {
+                downloaded = true;
+                break;
+            }
+            Err(e) => {
+                last_err = format!("attempt {attempt}/3: {e}");
+                let _ = fs::remove_file(&new_path);
+                std::thread::sleep(Duration::from_millis(1500));
+            }
+        }
+    }
+    if !downloaded {
+        return Err(format!("download failed ({last_err})"));
+    }
 
     if !sha256.is_empty() {
         let actual = sha256_file(&new_path)?;
@@ -276,7 +296,7 @@ fn download(
         format!("{BASE}{url}")
     };
     let resp = ureq::get(&full)
-        .timeout(Duration::from_secs(300))
+        .timeout(Duration::from_secs(600))
         .call()
         .map_err(|e| e.to_string())?;
     let total = resp
