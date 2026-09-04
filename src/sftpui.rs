@@ -107,9 +107,10 @@ pub struct SftpTab {
     pub remote_entries: Vec<FileEntry>,
     pub remote_sel: Option<usize>,
     pub remote_edit: String,
-    /// list sort: (key, ascending) — applied on refresh and on header click
-    pub local_sort: (sftp::SortKey, bool),
-    pub remote_sort: (sftp::SortKey, bool),
+    /// list sort: Some((key, ascending)) or None = natural order
+    /// (3-state cycle: asc → desc → none); applied on refresh and header click
+    pub local_sort: Option<(sftp::SortKey, bool)>,
+    pub remote_sort: Option<(sftp::SortKey, bool)>,
 
     pub loading: bool,
     pub error: Option<String>,
@@ -172,8 +173,8 @@ impl SftpTab {
             remote_entries: Vec::new(),
             remote_sel: None,
             remote_edit: String::new(),
-            local_sort: (sftp::SortKey::Name, true),
-            remote_sort: (sftp::SortKey::Name, true),
+            local_sort: Some((sftp::SortKey::Name, true)),
+            remote_sort: Some((sftp::SortKey::Name, true)),
             loading: true,
             error: None,
             op_rx,
@@ -233,8 +234,9 @@ impl SftpTab {
                 });
             }
         }
-        let (key, asc) = self.local_sort;
-        sftp::sort_entries_by(&mut entries, key, asc);
+        if let Some((key, asc)) = self.local_sort {
+            sftp::sort_entries_by(&mut entries, key, asc);
+        }
         self.local_sel = prev_sel.and_then(|n| entries.iter().position(|e| e.name == n));
         self.local_entries = entries;
         self.local_edit = dir.to_string_lossy().into_owned();
@@ -301,8 +303,9 @@ impl SftpTab {
             match msg {
                 OpMsg::RemoteList { dir, entries } => {
                     let mut entries = entries;
-                    let (key, asc) = self.remote_sort;
-                    sftp::sort_entries_by(&mut entries, key, asc);
+                    if let Some((key, asc)) = self.remote_sort {
+                        sftp::sort_entries_by(&mut entries, key, asc);
+                    }
                     self.remote_edit = dir.clone();
                     self.remote_dir = dir;
                     self.remote_entries = entries;
@@ -406,28 +409,42 @@ impl SftpTab {
         }
     }
 
-    /// click handler for the sort bar: same key toggles direction, new key sorts asc
+    /// click handler for the sort bar, 3-state: asc → desc → natural order.
+    /// "natural" means the directory's own order: local re-reads, remote re-lists.
     fn set_sort(&mut self, pane: Pane, key: sftp::SortKey) {
-        let (cur, asc) = match pane {
+        let cur = match pane {
             Pane::Local => self.local_sort,
             Pane::Remote => self.remote_sort,
         };
-        let next = if cur == key { (key, !asc) } else { (key, true) };
+        let next = match cur {
+            Some((k, true)) if k == key => Some((k, false)),
+            Some((k, false)) if k == key => None,
+            _ => Some((key, true)),
+        };
         match pane {
             Pane::Local => {
                 self.local_sort = next;
-                sftp::sort_entries_by(&mut self.local_entries, next.0, next.1);
+                match next {
+                    Some((k, a)) => sftp::sort_entries_by(&mut self.local_entries, k, a),
+                    None => self.refresh_local(),
+                }
             }
             Pane::Remote => {
                 self.remote_sort = next;
-                sftp::sort_entries_by(&mut self.remote_entries, next.0, next.1);
+                match next {
+                    Some((k, a)) => sftp::sort_entries_by(&mut self.remote_entries, k, a),
+                    None => {
+                        self.remote_sel = None;
+                        self.spawn_refresh_remote(None, false);
+                    }
+                }
             }
         }
     }
 
     /// the clickable sort bar above a file list
     fn sort_bar(&mut self, ui: &mut egui::Ui, pane: Pane) {
-        let (cur, asc) = match pane {
+        let cur = match pane {
             Pane::Local => self.local_sort,
             Pane::Remote => self.remote_sort,
         };
@@ -439,7 +456,8 @@ impl SftpTab {
                 (sftp::SortKey::Mtime, "sort_mtime"),
                 (sftp::SortKey::Ctime, "sort_ctime"),
             ] {
-                let active = cur == key;
+                let active = cur.is_some_and(|(k, _)| k == key);
+                let asc = cur.is_some_and(|(k, a)| k == key && a);
                 let label = if active {
                     // arrow indicates direction on the active key
                     format!("{} {}", tr(self.lang, label_key), if asc { "▲" } else { "▼" })
