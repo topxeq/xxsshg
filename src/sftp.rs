@@ -198,10 +198,6 @@ pub fn join_remote(dir: &str, name: &str) -> String {
     format!("{}/{}", d, name)
 }
 
-pub fn sort_entries(entries: &mut [FileEntry]) {
-    sort_entries_by(entries, SortKey::Name, true);
-}
-
 /// sort with directories always first, then by `key` (asc/desc)
 pub fn sort_entries_by(entries: &mut [FileEntry], key: SortKey, asc: bool) {
     entries.sort_by(|a, b| {
@@ -229,7 +225,9 @@ pub async fn list_dir(
     path: &str,
 ) -> Result<Vec<FileEntry>, String> {
     let read = sftp.read_dir(path).await.map_err(|e| e.to_string())?;
-    let mut out: Vec<FileEntry> = read
+    // NB: NO sorting here — the caller decides the order (the SFTP tab applies
+    // its current sort, and "no sort" must show the server's raw readdir order)
+    let out: Vec<FileEntry> = read
         .map(|e| {
             let md = e.metadata();
             let mtime = md.mtime.unwrap_or(0);
@@ -244,7 +242,6 @@ pub async fn list_dir(
         })
         .filter(|e| e.name != "." && e.name != "..")
         .collect();
-    sort_entries(&mut out);
     Ok(out)
 }
 

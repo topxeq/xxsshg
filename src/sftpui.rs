@@ -494,6 +494,13 @@ impl SftpTab {
             );
         }
         let st = stats.unwrap_or_default();
+        // pure-skip case (name conflict declined): say so directly
+        if st.files == 0 && st.skipped > 0 {
+            return format!(
+                "✓ {}",
+                tpl(tr(lang, "sftp_log_skip_only"), &[("name", t.name.as_str())])
+            );
+        }
         let mut line = tpl(
             tr(lang, if t.kind == TransferKind::Upload { "sftp_log_upload" } else { "sftp_log_download" }),
             &[

@@ -599,15 +599,20 @@ impl XxsshgApp {
         }
         let lang = self.lang();
         let current = env!("CARGO_PKG_VERSION");
-        let mut open = !matches!(self.update_ui, UpdateUi::Downloading { .. });
-        let mut action: Option<UpdateAction> = None;
-        egui::Window::new(tpl(tr(lang, "update_title"), &[]))
+        let downloading = matches!(self.update_ui, UpdateUi::Downloading { .. });
+        // no X button while downloading: the update cannot be cancelled
+        // (NB: open=false would hide the whole window — not what we want)
+        let mut open = true;
+        let mut win = egui::Window::new(tpl(tr(lang, "update_title"), &[]))
             .id(egui::Id::new("update_win"))
             .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
             .collapsible(false)
-            .resizable(false)
-            .open(&mut open)
-            .show(ui, |ui| {
+            .resizable(false);
+        if !downloading {
+            win = win.open(&mut open);
+        }
+        let mut action: Option<UpdateAction> = None;
+        win.show(ui, |ui| {
                 match &self.update_ui {
                     UpdateUi::Checking => {
                         ui.horizontal(|ui| {
@@ -675,8 +680,8 @@ impl XxsshgApp {
                     UpdateUi::Closed => {}
                 }
             });
-        // X button (hidden/disabled during a download)
-        if !open && !matches!(self.update_ui, UpdateUi::Downloading { .. }) {
+        // X button close (not shown during a download)
+        if !open && !downloading {
             action = Some(UpdateAction::Cancel);
         }
         let start = if let UpdateUi::Available { latest, url, sha256 } = &self.update_ui {
