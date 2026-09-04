@@ -166,6 +166,19 @@ pub fn restart() {
     std::process::exit(0);
 }
 
+/// Remove a leftover `<exe>.old` from a previous self-update. The detached
+/// cleanup timer usually fires while the app is still running (the old image
+/// stays locked by the process), so this startup sweep is what actually
+/// gets rid of it.
+pub fn cleanup_old_at_startup() {
+    if let Ok(exe) = current_exe() {
+        let old = exe_for_suffix(&exe, "old");
+        if old.exists() {
+            let _ = fs::remove_file(&old);
+        }
+    }
+}
+
 /// Console flow for the `--update` flag (parity with xxssh).
 pub fn run_cli(lang: crate::i18n::Language) {
     let current = env!("CARGO_PKG_VERSION");

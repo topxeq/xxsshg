@@ -34,6 +34,9 @@ fn main() -> eframe::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
         .init();
 
+    // sweep a leftover .old backup from a previous self-update
+    update::cleanup_old_at_startup();
+
     let servers_path = xconfig::default_config_path();
     let settings_path = xconfig::settings_path(&servers_path);
     let gui_path = gconfig::default_gui_config_path();
