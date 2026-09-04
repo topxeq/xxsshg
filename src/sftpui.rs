@@ -47,9 +47,15 @@ pub enum OpMsg {
     LocalRefresh { log: Option<String> },
 }
 
+/// which SFTP pane an action targets (sort bar etc.)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum ConfirmKind {
-    RemoteDelete,
+enum Pane {
+    Local,
+    Remote,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConfirmKind {    RemoteDelete,
     RemoteDeleteDir,
     LocalDelete,
     LocalDeleteDir,
@@ -101,6 +107,9 @@ pub struct SftpTab {
     pub remote_entries: Vec<FileEntry>,
     pub remote_sel: Option<usize>,
     pub remote_edit: String,
+    /// list sort: (key, ascending) — applied on refresh and on header click
+    pub local_sort: (sftp::SortKey, bool),
+    pub remote_sort: (sftp::SortKey, bool),
 
     pub loading: bool,
     pub error: Option<String>,
@@ -163,6 +172,8 @@ impl SftpTab {
             remote_entries: Vec::new(),
             remote_sel: None,
             remote_edit: String::new(),
+            local_sort: (sftp::SortKey::Name, true),
+            remote_sort: (sftp::SortKey::Name, true),
             loading: true,
             error: None,
             op_rx,
@@ -201,20 +212,29 @@ impl SftpTab {
             for e in rd.flatten() {
                 let Ok(ft) = e.file_type() else { continue };
                 let Ok(md) = e.metadata() else { continue };
+                let mtime = md
+                    .modified()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as u32)
+                    .unwrap_or(0);
+                let ctime = md
+                    .created()
+                    .ok()
+                    .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                    .map(|d| d.as_secs() as u32)
+                    .unwrap_or(mtime);
                 entries.push(FileEntry {
                     name: e.file_name().to_string_lossy().into_owned(),
                     is_dir: ft.is_dir(),
                     size: md.len(),
-                    mtime: md
-                        .modified()
-                        .ok()
-                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                        .map(|d| d.as_secs() as u32)
-                        .unwrap_or(0),
+                    mtime,
+                    ctime,
                 });
             }
         }
-        sftp::sort_entries(&mut entries);
+        let (key, asc) = self.local_sort;
+        sftp::sort_entries_by(&mut entries, key, asc);
         self.local_sel = prev_sel.and_then(|n| entries.iter().position(|e| e.name == n));
         self.local_entries = entries;
         self.local_edit = dir.to_string_lossy().into_owned();
@@ -280,6 +300,9 @@ impl SftpTab {
         while let Ok(msg) = self.op_rx.try_recv() {
             match msg {
                 OpMsg::RemoteList { dir, entries } => {
+                    let mut entries = entries;
+                    let (key, asc) = self.remote_sort;
+                    sftp::sort_entries_by(&mut entries, key, asc);
                     self.remote_edit = dir.clone();
                     self.remote_dir = dir;
                     self.remote_entries = entries;
@@ -381,6 +404,56 @@ impl SftpTab {
         if self.oplog.len() > 300 {
             self.oplog.drain(..self.oplog.len() - 300);
         }
+    }
+
+    /// click handler for the sort bar: same key toggles direction, new key sorts asc
+    fn set_sort(&mut self, pane: Pane, key: sftp::SortKey) {
+        let (cur, asc) = match pane {
+            Pane::Local => self.local_sort,
+            Pane::Remote => self.remote_sort,
+        };
+        let next = if cur == key { (key, !asc) } else { (key, true) };
+        match pane {
+            Pane::Local => {
+                self.local_sort = next;
+                sftp::sort_entries_by(&mut self.local_entries, next.0, next.1);
+            }
+            Pane::Remote => {
+                self.remote_sort = next;
+                sftp::sort_entries_by(&mut self.remote_entries, next.0, next.1);
+            }
+        }
+    }
+
+    /// the clickable sort bar above a file list
+    fn sort_bar(&mut self, ui: &mut egui::Ui, pane: Pane) {
+        let (cur, asc) = match pane {
+            Pane::Local => self.local_sort,
+            Pane::Remote => self.remote_sort,
+        };
+        ui.horizontal_wrapped(|ui| {
+            ui.weak(tpl(tr(self.lang, "sort_label"), &[]));
+            for (key, label_key) in [
+                (sftp::SortKey::Name, "sort_name"),
+                (sftp::SortKey::Size, "sort_size"),
+                (sftp::SortKey::Mtime, "sort_mtime"),
+                (sftp::SortKey::Ctime, "sort_ctime"),
+            ] {
+                let active = cur == key;
+                let label = if active {
+                    // arrow indicates direction on the active key
+                    format!("{} {}", tr(self.lang, label_key), if asc { "▲" } else { "▼" })
+                } else {
+                    tr(self.lang, label_key).to_string()
+                };
+                if ui
+                    .selectable_label(active, egui::RichText::new(label).small())
+                    .clicked()
+                {
+                    self.set_sort(pane, key);
+                }
+            }
+        });
     }
 
     /// human-readable result line for a finished transfer
@@ -1187,6 +1260,8 @@ impl SftpTab {
                     }
                 });
                 ui.separator();
+                self.sort_bar(ui, Pane::Remote);
+                ui.separator();
 
                 egui::ScrollArea::vertical()
                     .auto_shrink([false, false])
@@ -1293,6 +1368,8 @@ impl SftpTab {
                     self.upload_selected();
                 }
             });
+            ui.separator();
+            self.sort_bar(ui, Pane::Local);
             ui.separator();
 
             ui.label(egui::RichText::new(self.local_dir.to_string_lossy().as_ref()).weak().small());

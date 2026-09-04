@@ -160,6 +160,12 @@ Config: ~/.xxssh (servers.json / settings.json / gui.json)", "轻量级图形 SS
     ("sftp_log_created", "Created {name}", "已创建 {name}", "已新增 {name}"),
     ("sftp_log_dropped", "Received {n} dropped item(s), uploading", "接收拖放 {n} 个项目，开始上传", "接收拖放 {n} 個項目，開始上傳"),
     ("sftp_drop_hint", "Release to upload to the remote folder", "释放以上传到远程当前目录", "釋放以上傳到遠端目前目錄"),
+    // ---- sftp list sorting ----
+    ("sort_label", "Sort:", "排序：", "排序："),
+    ("sort_name", "Name", "名称", "名稱"),
+    ("sort_size", "Size", "大小", "大小"),
+    ("sort_mtime", "Modified", "修改时间", "修改時間"),
+    ("sort_ctime", "Created", "创建时间", "建立時間"),
     ("sftp_confirm_delete", "Delete \"{name}\"?", "确认删除 \"{name}\"？", "確認刪除 \"{name}\"？"),
     ("sftp_confirm_delete_dir", "Delete folder \"{name}\" and everything inside it?", "确认删除文件夹 \"{name}\" 及其全部内容？", "確認刪除資料夾 \"{name}\" 及其全部內容？"),
     ("sftp_new_name", "Name", "名称", "名稱"),

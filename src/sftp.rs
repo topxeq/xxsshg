@@ -174,8 +174,20 @@ pub struct FileEntry {
     pub name: String,
     pub is_dir: bool,
     pub size: u64,
-    #[allow(dead_code)] // shown in a future detailed-list view
+    /// modification time (unix seconds)
     pub mtime: u32,
+    /// creation time (unix seconds). SFTP v3 has no creation time — remote
+    /// entries carry the mtime here (servers cannot report ctime).
+    pub ctime: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SortKey {
+    #[default]
+    Name,
+    Size,
+    Mtime,
+    Ctime,
 }
 
 pub fn join_remote(dir: &str, name: &str) -> String {
@@ -187,10 +199,28 @@ pub fn join_remote(dir: &str, name: &str) -> String {
 }
 
 pub fn sort_entries(entries: &mut [FileEntry]) {
-    entries.sort_by(|a, b| match (b.is_dir, a.is_dir) {
-        (true, false) => std::cmp::Ordering::Less,
-        (false, true) => std::cmp::Ordering::Greater,
-        _ => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+    sort_entries_by(entries, SortKey::Name, true);
+}
+
+/// sort with directories always first, then by `key` (asc/desc)
+pub fn sort_entries_by(entries: &mut [FileEntry], key: SortKey, asc: bool) {
+    entries.sort_by(|a, b| {
+        match (a.is_dir, b.is_dir) {
+            (true, false) => return std::cmp::Ordering::Less,
+            (false, true) => return std::cmp::Ordering::Greater,
+            _ => {}
+        }
+        let ord = match key {
+            SortKey::Name => a.name.to_lowercase().cmp(&b.name.to_lowercase()),
+            SortKey::Size => a.size.cmp(&b.size),
+            SortKey::Mtime => a.mtime.cmp(&b.mtime),
+            SortKey::Ctime => a.ctime.cmp(&b.ctime),
+        };
+        if asc {
+            ord
+        } else {
+            ord.reverse()
+        }
     });
 }
 
@@ -202,11 +232,14 @@ pub async fn list_dir(
     let mut out: Vec<FileEntry> = read
         .map(|e| {
             let md = e.metadata();
+            let mtime = md.mtime.unwrap_or(0);
             FileEntry {
                 name: e.file_name(),
                 is_dir: md.is_dir(),
                 size: md.size.unwrap_or(0),
-                mtime: md.mtime.unwrap_or(0),
+                mtime,
+                // SFTP v3 has no creation time attribute
+                ctime: mtime,
             }
         })
         .filter(|e| e.name != "." && e.name != "..")
