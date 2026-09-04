@@ -1132,6 +1132,18 @@ impl XxsshgApp {
             Tab::Sftp { st } => {
                 st.poll();
                 st.ui(ui);
+                // OS drag&drop: files dropped anywhere in the window upload into
+                // the current remote dir while an SFTP tab is active
+                let dropped: Vec<PathBuf> = ui.input(|i| {
+                    i.raw
+                        .dropped_files
+                        .iter()
+                        .map(|f| f.path().to_path_buf())
+                        .collect()
+                });
+                if !dropped.is_empty() {
+                    st.handle_os_dropped(dropped);
+                }
             }
             Tab::SftpConnecting { status, .. } => {
                 ui.centered_and_justified(|ui| {

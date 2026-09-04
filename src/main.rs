@@ -66,7 +66,9 @@ fn main() -> eframe::Result {
         .with_inner_size(window_size)
         .with_min_inner_size([640.0, 400.0])
         .with_title(window_title())
-        .with_icon(load_icon());
+        .with_icon(load_icon())
+        // OS-level file drag&drop: dropping Explorer files uploads them (SFTP tab)
+        .with_drag_and_drop(true);
     if gcfg.window.saved {
         // Restore last-session geometry
         viewport = viewport

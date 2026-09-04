@@ -424,19 +424,29 @@ impl SftpTab {
     fn upload_selected(&mut self) {
         let Some(idx) = self.local_sel else { return };
         let Some(e) = self.local_entries.get(idx) else { return };
-        let lname = e.name.clone();
-        let is_dir = e.is_dir;
-        let lpath = self.local_dir.join(&lname);
+        self.upload_path(self.local_dir.join(&e.name), e.name.clone());
+    }
+
+    /// upload an arbitrary local path into the current remote dir — the toolbar,
+    /// context menu and OS drag&drop all land here
+    fn upload_path(&mut self, lpath: PathBuf, name: String) {
+        let Ok(md) = std::fs::metadata(&lpath) else {
+            let msg = format!("{} (missing)", lpath.display());
+            self.error = Some(msg.clone());
+            self.oplog_push(format!("✗ {msg}"));
+            return;
+        };
+        let is_dir = md.is_dir();
         let rdir = self.remote_dir.clone();
         // target includes the item's own name: file -> remote file path,
         // dir -> remote folder created (merged if it already exists)
-        let rtarget = sftp::join_remote(&rdir, &lname);
+        let rtarget = sftp::join_remote(&rdir, &name);
         let sftp = self.sftp.clone();
         let tx = self.op_tx.clone();
         let id = self.start_transfer(
             TransferKind::Upload,
-            lname.clone(),
-            if is_dir { 0 } else { e.size },
+            name.clone(),
+            if is_dir { 0 } else { md.len() },
         );
         let prog_id = id;
         let prog_tx = self.prog_tx.clone();
@@ -474,6 +484,24 @@ impl SftpTab {
                 refresh_local: false,
             });
         });
+    }
+
+    /// OS-level drag & drop: upload dropped files/folders into the current remote dir
+    pub fn handle_os_dropped(&mut self, paths: Vec<PathBuf>) {
+        let mut count = 0usize;
+        for path in paths {
+            let Some(name) = path.file_name().map(|s| s.to_string_lossy().into_owned()) else {
+                continue;
+            };
+            self.upload_path(path, name);
+            count += 1;
+        }
+        if count > 0 {
+            self.oplog_push(tpl(
+                tr(self.lang, "sftp_log_dropped"),
+                &[("n", &count.to_string())],
+            ));
+        }
     }
 
     /// Download selected remote file/dir into the current local dir
@@ -1184,6 +1212,25 @@ impl SftpTab {
                             });
                         }
                     });
+
+                // OS drag&drop hover feedback (drawn last = on top of the list)
+                if !ui.input(|i| i.raw.hovered_files.is_empty()) {
+                    let rect = ui.max_rect();
+                    let green = egui::Color32::from_rgb(74, 246, 118);
+                    ui.painter().rect_filled(
+                        rect,
+                        8.0,
+                        egui::Color32::from_rgba_unmultiplied(74, 246, 118, 20),
+                    );
+                    ui.painter().rect_stroke(rect, 8.0, (2.5, green), egui::StrokeKind::Inside);
+                    ui.painter().text(
+                        rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        tpl(tr(self.lang, "sftp_drop_hint"), &[]),
+                        egui::FontId::proportional(20.0),
+                        green,
+                    );
+                }
             });
 
         // Local pane + transfers in the center
