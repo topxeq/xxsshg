@@ -6,6 +6,26 @@
 
 ---
 
+## 2026-09-05 会话：xxssh TUI 自更新修复 + 四平台重发布（v0.5.3）
+
+### 触发与修复（xxssh repo，dce7b84）
+- 用户 Ubuntu 上 `xxssh --update` 报 "No matching version for the current platform at v0.6.3"：xxssh 的自更新在全平台取最高 isLatest，取到 GUI 的 0.6.3（同卡版本线独立）→ 与 xxsshg 完全同源镜像的 bug
+- 修复：`current_platform_versions` 先按本平台过滤（Windows 上排除 "Windows GUI" 平台条目）再取最高；测试覆盖该失败场景（含宿主自适应）
+- xxssh v0.5.3 发布：Windows/Linux x64（本机）、Linux ARM64（cargo zigbuild musl 交叉）、macOS universal（GitHub Actions 构建）
+
+### 事故与恢复：TUI 发布脚本跨平台误删
+- publish-0.5.3.ps1（沿袭旧模板）的"清理旧版本"段删光了其他平台：Linux ARM64/macOS 0.5.2 与 **Windows GUI 0.6.3** 被误删（商店一度只剩 Windows 0.5.3）
+- 恢复：Linux x64 0.5.3 立即重发；ARM64 用 zigbuild 重编发布；Windows GUI 0.6.3 重跑 xxsshg 发布脚本；macOS 经 GitHub Actions 构建后下载发布——五平台全部恢复 isLatest
+- 新工具 cleanup-tui-platform.py（平台限定清理，参数=保留版本+平台列表）；0.5.3 各发布脚本已全部换成平台限定版
+
+### CI 认知修正
+- **多平台二进制一直在 GitHub Actions 构建**：repo/.github/workflows/release.yml 推 `v*` tag 触发（Windows / Linux x64 musl / Linux ARM64 musl / macOS universal lipo），产物挂 GitHub Release；build-arm64.yml（workflow_dispatch）用于 ARM64 补发
+- magicdo.top 发布仍是本地脚本：从 GitHub Release 下载后转发布
+
+### 遗留
+- 已发布的 0.5.2 及更早 TUI 自更新二进制逻辑仍是坏的（跳不过 0.5.2），存量用户需走 install 脚本或手动下载一次到 0.5.3+
+- ARM64/macOS 若无新版要发，暂无影响；下次 TUI 发版四平台应一起出
+
 ## 2026-09-05 发布会话（v0.6.3）：终端自动聚焦 + 字体清晰度设置
 
 ### 功能（0.6.2 → 0.6.3）

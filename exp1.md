@@ -277,3 +277,34 @@ Windows 下运行中的 exe 不可写，`cargo build --release` 链接阶段报 
 ### 观感问题也是问题
 
 "窗口自动关闭、重开显示已是最新"——流程 100% 正确，用户依然迷惑。反馈闭环不仅指结果数据，还指**过程可见性**：看不见的下载等于没在下载。修复后（进度条全程可见）这类迷惑自然消失。
+
+---
+
+## 2026-09（续二）：同卡自更新连锁事故与 CI 取包
+
+### 同卡多构建：自更新的版本选择必须平台作用域（两构建双向验证）
+
+xxsshg 修过的"全平台最高 isLatest 选到别人版本号"的 bug，在 xxssh TUI 上以镜像形式复发：GUI 0.6.3 > TUI 0.5.2，TUI 的 `--update` 解析出 0.6.3 后找不到 Linux 条目而报错。**同一张产品卡上挂多个构建时，每个构建的自更新都必须先按自己的平台过滤再取最高**；两边的过滤还要互斥（TUI 排除 "GUI" 平台名）。这次是写完 xxsshg 修复后、TUI 用户实测报错才补的 TUI 侧——同卡发布模式下这是成对出现的约束，改一边要立刻审另一边。
+
+### 发布脚本的"清理旧版本"默认跨平台是地雷
+
+publish-0.5.3.ps1（复制自 0.5.2 旧模板）的清理段删光了其他平台版本——Linux ARM64/macOS 0.5.2 和刚发布的 Windows GUI 0.6.3 一起没了。此前在 xxsshg 清理脚本上记过同样的坑，却没审 TUI 脚本。
+
+**教训与处置**：
+- 跑任何发布脚本前，审计其清理段的**作用域**（本次事故就是没通读 0.5.2 脚本全貌）；
+- 清理脚本一律做成"平台 + 版本"双参数的限定版（cleanup-tui-platform.py）；
+- 事故取证：被删条目可从发布历史推断（记得发过什么），恢复靠重发布（二进制可重建的走构建，不可重建的走 CI/外部机器）。
+
+### 私有仓库的 GitHub API 三件事
+
+1. 匿名访问 404（仓库私有），令牌从 `git credential fill` 取（git 推送用的凭据就是它）；
+2. 查询类调用带 `Authorization: token` 头即可；
+3. **资产下载必须两步**：先请求 assets 端点拿 302 的签名 Location（S3 预签名 URL 自带授权），再对 Location 裸拉——curl 跨主机重定向会剥离 Authorization 头，直接 `-L` 会拿到 404；查询参数式 `?access_token=` 已被 GitHub 停用（400）。
+
+### 慢速大文件下载：签名 URL 会过期 → 循环断点续传
+
+GitHub Release 的 S3 签名 URL 带一小时有效期，慢速链路（~140KB/s）下一次拉不完就 403。模式：循环「取新签名 URL → `curl --continue-at -` 断点续传 → 校验文件大小」，直到字节数达标。本次 18.7MB 拉了三轮。
+
+### 多平台构建找 CI，不要手工拼工具链
+
+xxssh 的四平台产物一直在 GitHub Actions 构建：推 `v*` tag 触发 release.yml（Windows / Linux x64 musl / Linux ARM64 musl / macOS universal lipo，产物挂 GitHub Release），ARM64 单独补发用 build-arm64.yml（workflow_dispatch）。本地 zigbuild 能救急（本次 ARM64 就是它重编的），但常规发版走 CI 才是正道。**接手项目先看 .github/workflows**——这次是凭老记忆说"macOS 得用真机"，被用户一句"难道不是在 github 上编译吗"纠正。
