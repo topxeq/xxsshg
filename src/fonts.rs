@@ -196,8 +196,6 @@ mod shift_tests {
 
 #[cfg(test)]
 mod hinting_probe_tests {
-    use super::*;
-
     /// Collects outline points so different hinting targets can be compared.
     struct PointCollector(Vec<String>);
     impl skrifa::outline::OutlinePen for PointCollector {
