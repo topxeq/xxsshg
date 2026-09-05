@@ -135,6 +135,10 @@ pub struct Terminal {
     drag_anchor: Option<SelPoint>,
     /// Whether we enabled IME for the window (terminal focused)
     ime_allowed: bool,
+    /// request keyboard focus on the next paint (new tab / tab switch)
+    pub focus_pending: bool,
+    /// last logged focus state (avoid duplicate diag lines)
+    last_focus_logged: Option<bool>,
     /// True while an IME composition is in progress (pinyin being edited):
     /// raw key presses in this window must NOT reach the remote, or editing
     /// the pinyin (backspace etc.) would delete text already typed.
@@ -187,6 +191,8 @@ impl Terminal {
                 selection: None,
                 drag_anchor: None,
                 ime_allowed: false,
+                focus_pending: true,
+                last_focus_logged: None,
                 composing: false,
                 preedit: String::new(),
                 pending_zoom: None,
@@ -590,6 +596,11 @@ impl Terminal {
         }
 
         // ---- input handling -------------------------------------------------
+        // New tab / tab switch: grab keyboard focus without a click
+        if self.focus_pending {
+            self.focus_pending = false;
+            response.request_focus();
+        }
         // Right-click: copy when there is a selection, paste when there is none.
         // Plain left-click always clears an existing selection.
         if response.secondary_clicked() {
@@ -686,6 +697,13 @@ impl Terminal {
         // IME: enable composition while the terminal has focus, and park the
         // composition window at the terminal cursor position.
         let focused = response.has_focus();
+        if self.last_focus_logged != Some(focused) {
+            self.last_focus_logged = Some(focused);
+            crate::diag::log(&format!(
+                "terminal focus: {} (click the terminal to focus it)",
+                focused
+            ));
+        }
         // Claim exclusive access to Tab / arrows / Escape while focused, so egui
         // does not use them for focus navigation (Tab used to jump to the sidebar)
         if focused {

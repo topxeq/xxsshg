@@ -279,6 +279,8 @@ pub struct XxsshgApp {
     question: Option<PendingQuestion>,
     settings_open: bool,
     about_open: bool,
+    /// previous active tab (to auto-focus newly activated terminals)
+    prev_active_tab: usize,
     /// self-update dialog
     update_ui: UpdateUi,
     update_rx: Option<std::sync::mpsc::Receiver<UpdateMsg>>,
@@ -324,6 +326,7 @@ impl XxsshgApp {
             question: None,
             settings_open: false,
             about_open: false,
+            prev_active_tab: 0,
             update_ui: UpdateUi::Closed,
             update_rx: None,
             quit_confirm: false,
@@ -478,6 +481,7 @@ impl XxsshgApp {
                     server: None,
                 });
                 self.active_tab = self.tabs.len() - 1;
+                self.prev_active_tab = self.active_tab; // Terminal::new starts focus_pending=true
             }
             Err(e) => self.toast(e),
         }
@@ -1120,6 +1124,14 @@ impl XxsshgApp {
             return;
         }
         self.active_tab = self.active_tab.min(self.tabs.len() - 1);
+        // tab switch (or the active tab just materialized): hand keyboard focus
+        // to the terminal without requiring a click
+        if self.active_tab != self.prev_active_tab {
+            self.prev_active_tab = self.active_tab;
+            if let Some(Tab::Open { term, .. }) = self.tabs.get_mut(self.active_tab) {
+                term.focus_pending = true;
+            }
+        }
         let i = self.active_tab;
         let mut do_reconnect = false;
         match &mut self.tabs[i] {
