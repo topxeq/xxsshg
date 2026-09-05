@@ -6,6 +6,16 @@
 
 ---
 
+## 2026-09-05 发布会话（v0.6.3）：终端自动聚焦 + 字体清晰度设置
+
+### 功能（0.6.2 → 0.6.3）
+- **终端自动聚焦**：新建页签（SSH/本地/重连）与切换页签自动获得键盘焦点，无需点击即可输入；焦点状态变化写 session-debug.log（用于区分"没焦点"与"会话死亡"）
+- **「字体清晰渲染」设置项**：设置对话框新增勾选（默认开），关闭 = egui 平滑渲染；保存立即重装字体生效
+- **Mono hinting 目标（发虚真凶）**：skrifa 探针实测 Consolas 在 Smooth 模式下 `preserve_linear_metrics` 开/关输出逐位相同（ClearType 字体设计上不做水平拟合），Mono 目标才横向网格对齐 → 锐利模式拉丁字体用 Mono 目标，CJK 回退保持 Smooth（Mono 拟合会断中文笔画）；顺带修复误删的 cjk_fallback 注册
+
+### 发布
+- v0.6.3 发布到仙缘渡 xxssh 卡 "Windows GUI"（publish-xxsshg-0.6.3.ps1）；清理 0.6.2
+
 ## 2026-09-05 发布会话（v0.6.2）：文字清晰度
 
 - **根因**：egui 0.36 默认 hinting 配置 `preserve_linear_metrics: true` 关闭水平网格对齐——上游文档明言竖直笔画在低 DPI 屏幕会发软
