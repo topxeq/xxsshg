@@ -2,7 +2,28 @@
 
 use std::sync::Arc;
 
-use egui::epaint::text::FontData;
+use egui::epaint::text::{FontData, FontTweak, HintingTarget, SmoothHinting};
+
+/// Terminal text lives at small sizes on low-dpi screens: egui's default hinting
+/// keeps advances unhinted (`preserve_linear_metrics: true`), which leaves
+/// vertical stems soft. egui positions glyphs from the shaper's advances (not
+/// the hinted outline), so enabling horizontal grid-fitting costs no layout
+/// drift — only sharpness.
+fn sharp_font_data(bytes: Vec<u8>) -> FontData {
+    FontData {
+        font: bytes.into(),
+        index: 0,
+        tweak: FontTweak {
+            hinting: Some(true),
+            hinting_target: HintingTarget::Smooth(SmoothHinting {
+                light: false,
+                symmetric_rendering: true,
+                preserve_linear_metrics: false,
+            }),
+            ..Default::default()
+        },
+    }
+}
 
 /// Selectable terminal monospace fonts: (settings label, file path).
 /// The first existing entry is the "default" (auto) choice.
@@ -81,10 +102,7 @@ pub fn apply_fonts(ctx: &egui::Context, mono_choice: &str) {
     // Terminal monospace (crisper than egui's built-in unhinted monospace)
     if let Some((_label, path)) = resolve_mono(mono_choice) {
         if let Ok(bytes) = std::fs::read(path) {
-            defs.font_data.insert(
-                "term_mono".into(),
-                Arc::new(FontData { font: bytes.into(), index: 0, tweak: Default::default() }),
-            );
+            defs.font_data.insert("term_mono".into(), Arc::new(sharp_font_data(bytes)));
             if let Some(family) = defs.families.get_mut(&egui::FontFamily::Monospace) {
                 family.insert(0, "term_mono".into());
             }
@@ -97,10 +115,7 @@ pub fn apply_fonts(ctx: &egui::Context, mono_choice: &str) {
             // The CJK font's glyphs sit higher in their em box than the Latin
             // terminal font; nudge them down so mixed lines align. Tunable via
             // XXSSHG_CJK_SHIFT (fraction of font size, default 0.12).
-            defs.font_data.insert(
-                "cjk_fallback".into(),
-                Arc::new(FontData { font: bytes.into(), index: 0, tweak: Default::default() }),
-            );
+            defs.font_data.insert("cjk_fallback".into(), Arc::new(sharp_font_data(bytes)));
             defs.families
                 .entry(egui::FontFamily::Proportional)
                 .or_default()

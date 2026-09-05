@@ -153,6 +153,8 @@ pub struct Terminal {
     pub pending_new_cmd: bool,
     /// Scrollbar thumb drag: grab offset within the thumb (px)
     scroll_drag: Option<f32>,
+    /// last logged render-metrics tuple (ppp, font_size, cell_w, cell_h) bits
+    last_metrics: Option<(u32, u32, u32, u32)>,
 }
 
 impl Terminal {
@@ -193,6 +195,7 @@ impl Terminal {
                 pending_close_tab: false,
                 pending_new_cmd: false,
                 scroll_drag: None,
+                last_metrics: None,
             },
             title_rx,
             bell_rx,
@@ -305,13 +308,16 @@ impl Terminal {
             ),
             egui::Sense::click() | egui::Sense::drag(),
         );
-        // Cell metrics from the monospace font
-        let font_id = egui::FontId::monospace(font_size);
         // Snap cell metrics and the grid origin to whole physical pixels:
         // fractional glyph positions (measured widths are fractional, vertical
         // centering adds 0.5px) make stems blurry / ghosted on LCDs.
         let ppp = ui.ctx().pixels_per_point();
         let q = |v: f32| (v * ppp).round() / ppp;
+        // Snap the FONT SIZE to whole physical pixels too: a fractional raster
+        // size (14pt at 125% DPI = 17.5px) renders every glyph soft no matter
+        // how the cell grid is aligned.
+        let font_size = ((font_size * ppp).round().max(1.0)) / ppp;
+        let font_id = egui::FontId::monospace(font_size);
         // Measure the real typographic ADVANCE (layout of 10 'M's / 10), not the
         // glyph ink width: glyph_width('M') is the bounding-box width, which lacks
         // the side bearings, so text drifts right cumulatively while the cursor
@@ -334,6 +340,21 @@ impl Terminal {
         let origin = egui::pos2(q(rect.min.x), q(rect.min.y));
         self.cell_w = cell_w;
         self.cell_h = cell_h;
+        {
+            let key = (
+                ppp.to_bits(),
+                font_size.to_bits(),
+                cell_w.to_bits(),
+                cell_h.to_bits(),
+            );
+            if self.last_metrics != Some(key) {
+                self.last_metrics = Some(key);
+                crate::diag::log(&format!(
+                    "render metrics: ppp={ppp} font={:.1}px cell={cell_w:.2}x{cell_h:.2}",
+                    font_size * ppp
+                ));
+            }
+        }
 
         // Headroom for the first row's ascenders (tall CJK glyphs at the top
         // edge would otherwise be clipped by the widget rect)
@@ -351,7 +372,7 @@ impl Terminal {
         let default_bg = self.resolve_color(Color::Named(NamedColor::Background), ui);
         painter.rect_filled(rect, 0.0, default_bg);
 
-        let mono_id = egui::FontId::new(font_size, egui::FontFamily::Monospace);
+        let mono_id = font_id.clone();
 
         // Render PER CELL at absolute grid coordinates. Batching runs through the
         // text layouter measures advances slightly differently than the grid steps,
