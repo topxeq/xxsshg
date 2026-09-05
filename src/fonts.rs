@@ -9,19 +9,27 @@ use egui::epaint::text::{FontData, FontTweak, HintingTarget, SmoothHinting};
 /// vertical stems soft. egui positions glyphs from the shaper's advances (not
 /// the hinted outline), so enabling horizontal grid-fitting costs no layout
 /// drift — only sharpness.
-fn sharp_font_data(bytes: Vec<u8>, sharp: bool) -> FontData {
+fn sharp_font_data(bytes: Vec<u8>, sharp: bool, latin: bool) -> FontData {
+    // ClearType-era fonts (Consolas et al) deliberately skip horizontal
+    // grid-fitting in Smooth mode — their stems stay subpixel by design,
+    // which reads as a soft halo under egui's grayscale integer renderer
+    // (verified: Smooth{plm:true} == Smooth{plm:false} for Consolas, while
+    // Target::Mono produces grid-fit outlines). Terminals want the Mono fit.
+    let hinting_target = if sharp && latin {
+        HintingTarget::Mono
+    } else {
+        HintingTarget::Smooth(SmoothHinting {
+            light: false,
+            symmetric_rendering: true,
+            preserve_linear_metrics: !sharp,
+        })
+    };
     FontData {
         font: bytes.into(),
         index: 0,
         tweak: FontTweak {
             hinting: Some(true),
-            hinting_target: HintingTarget::Smooth(SmoothHinting {
-                light: false,
-                symmetric_rendering: true,
-                // sharp: grid-fit horizontally (crisper stems);
-                // smooth: keep the font's unhinted proportions
-                preserve_linear_metrics: !sharp,
-            }),
+            hinting_target,
             // sharp: rasterize only at whole-pixel positions. The terminal
             // places every cell on integer pixels, so egui's subpixel binning
             // (1/4px glyph offsets) just adds a gray halo around each glyph.
@@ -108,7 +116,7 @@ pub fn apply_fonts(ctx: &egui::Context, mono_choice: &str, sharp: bool) {
     // Terminal monospace (crisper than egui's built-in unhinted monospace)
     if let Some((_label, path)) = resolve_mono(mono_choice) {
         if let Ok(bytes) = std::fs::read(path) {
-            defs.font_data.insert("term_mono".into(), Arc::new(sharp_font_data(bytes, sharp)));
+            defs.font_data.insert("term_mono".into(), Arc::new(sharp_font_data(bytes, sharp, true)));
             if let Some(family) = defs.families.get_mut(&egui::FontFamily::Monospace) {
                 family.insert(0, "term_mono".into());
             }
@@ -121,7 +129,12 @@ pub fn apply_fonts(ctx: &egui::Context, mono_choice: &str, sharp: bool) {
             // The CJK font's glyphs sit higher in their em box than the Latin
             // terminal font; nudge them down so mixed lines align. Tunable via
             // XXSSHG_CJK_SHIFT (fraction of font size, default 0.12).
-            defs.font_data.insert("cjk_fallback".into(), Arc::new(sharp_font_data(bytes, sharp)));
+            // smooth hinting even in sharp mode: Mono grid-fitting breaks dense
+            // CJK strokes at these sizes (latin=true only for the terminal font)
+            defs.font_data.insert(
+                "cjk_fallback".into(),
+                Arc::new(sharp_font_data(bytes, sharp, false)),
+            );
             defs.families
                 .entry(egui::FontFamily::Proportional)
                 .or_default()
@@ -178,5 +191,93 @@ mod shift_tests {
         assert!(v.is_some());
         let v = v.unwrap();
         assert!(v.abs() < 1.0, "shift out of sane range: {v}");
+    }
+}
+
+#[cfg(test)]
+mod hinting_probe_tests {
+    use super::*;
+
+    /// Collects outline points so different hinting targets can be compared.
+    struct PointCollector(Vec<String>);
+    impl skrifa::outline::OutlinePen for PointCollector {
+        fn move_to(&mut self, x: f32, y: f32) {
+            self.0.push(format!("M {x:.2} {y:.2}"));
+        }
+        fn line_to(&mut self, x: f32, y: f32) {
+            self.0.push(format!("L {x:.2} {y:.2}"));
+        }
+        fn quad_to(&mut self, cx: f32, cy: f32, x: f32, y: f32) {
+            self.0.push(format!("Q {cx:.2} {cy:.2} {x:.2} {y:.2}"));
+        }
+        fn curve_to(&mut self, c1x: f32, c1y: f32, c2x: f32, c2y: f32, x: f32, y: f32) {
+            self.0.push(format!("C {c1x:.2} {c1y:.2} {c2x:.2} {c2y:.2} {x:.2} {y:.2}"));
+        }
+        fn close(&mut self) {
+            self.0.push("Z".into());
+        }
+    }
+
+    fn outline_at(target: skrifa::outline::Target, ch: char) -> Option<Vec<String>> {
+        use skrifa::MetadataProvider as _;
+        let bytes = std::fs::read("C:/Windows/Fonts/consola.ttf").ok()?;
+        let font = skrifa::FontRef::from_index(&bytes, 0).ok()?;
+        let glyphs = font.outline_glyphs();
+        let gid = font.charmap().map(ch)?;
+        let glyph = glyphs.get(gid)?;
+        let hinting = skrifa::outline::HintingInstance::new(
+            &glyphs,
+            skrifa::instance::Size::new(18.0),
+            skrifa::instance::LocationRef::default(),
+            target,
+        )
+        .ok()?;
+        let mut pen = PointCollector(Vec::new());
+        glyph
+            .draw(
+                skrifa::outline::DrawSettings::hinted(&hinting, false),
+                &mut pen,
+            )
+            .ok()?;
+        Some(pen.0)
+    }
+
+    /// DECISIVE probe: do the different hinting targets actually produce
+    /// different (grid-fit) outlines for Consolas on this machine?
+    /// If these are all identical, skrifa is not hinting this font and no
+    /// amount of hinting_target configuration can change sharpness.
+    #[test]
+    fn consolas_hinting_targets_differ() {
+        let smooth_default = outline_at(
+            skrifa::outline::Target::Smooth {
+                mode: skrifa::outline::SmoothMode::Normal,
+                symmetric_rendering: true,
+                preserve_linear_metrics: true,
+            },
+            'M',
+        )
+        .expect("consola.ttf missing or unusable");
+        let smooth_gridfit = outline_at(
+            skrifa::outline::Target::Smooth {
+                mode: skrifa::outline::SmoothMode::Normal,
+                symmetric_rendering: true,
+                preserve_linear_metrics: false,
+            },
+            'M',
+        )
+        .expect("outline failed");
+        let mono = outline_at(skrifa::outline::Target::Mono, 'M').expect("outline failed");
+
+        eprintln!("default lines: {}", smooth_default.len());
+        eprintln!("gridfit lines: {}", smooth_gridfit.len());
+        eprintln!("mono     lines: {}", mono.len());
+        eprintln!("default == gridfit: {}", smooth_default == smooth_gridfit);
+        eprintln!("gridfit == mono:    {}", smooth_gridfit == mono);
+        let sample_d: Vec<_> = smooth_default.iter().take(4).cloned().collect();
+        let sample_g: Vec<_> = smooth_gridfit.iter().take(4).cloned().collect();
+        let sample_m: Vec<_> = mono.iter().take(4).cloned().collect();
+        eprintln!("default sample: {sample_d:?}");
+        eprintln!("gridfit sample: {sample_g:?}");
+        eprintln!("mono     sample: {sample_m:?}");
     }
 }
