@@ -203,6 +203,7 @@ Config: ~/.xxssh (servers.json / settings.json / gui.json)", "轻量级图形 SS
     ("sftp_rename_all", "Rename all", "全部重命名", "全部重新命名"),
     ("hk_new_cmd", "New CMD hotkey", "新建CMD热键", "新建CMD熱鍵"),
     ("s_font_default", "Default (system)", "默认（跟随系统）", "預設（跟隨系統）"),
+    ("s_sharp_font", "Sharp font rendering (hinting)", "字体清晰渲染（hinting）", "字體清晰渲染（hinting）"),
     ("bell_mute", "Mute", "静音", "靜音"),
     ("bell_flash", "Flash", "闪烁", "閃爍"),
     ("bell_sound", "Sound", "响铃", "響鈴"),

@@ -70,6 +70,10 @@ pub struct GuiConfig {
     /// Font family override; empty = built-in monospace + system CJK fallback
     #[serde(default)]
     pub font_family: String,
+    /// Sharp terminal font rendering: full hinting with horizontal grid-fit.
+    /// false = smoother outlines (egui's default hinting)
+    #[serde(default = "default_true")]
+    pub sharp_font: bool,
     /// Terminal scrollback buffer size in lines
     #[serde(default = "default_scrollback")]
     pub scrollback_lines: u32,
@@ -212,6 +216,7 @@ impl Default for GuiConfig {
             theme: Theme::default(),
             font_size: default_font_size(),
             font_family: String::new(),
+            sharp_font: true,
             scrollback_lines: default_scrollback(),
             copy_on_select: true,
             confirm_on_quit: true,

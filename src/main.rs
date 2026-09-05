@@ -86,11 +86,12 @@ fn main() -> eframe::Result {
     // first call) silently shuts down all background session tasks.
     let rt_handle = rt.handle().clone();
     let mono_choice = gcfg.font_family.clone();
+    let sharp_font = gcfg.sharp_font;
     eframe::run_native(
         "xxsshg",
         options,
         Box::new(move |cc| {
-            install_fonts(cc, &mono_choice);
+            install_fonts(cc, &mono_choice, sharp_font);
             Ok(Box::new(XxsshgApp::new(
                 rt_handle.clone(),
                 servers_path,
@@ -126,6 +127,6 @@ fn load_icon() -> egui::IconData {
 }
 
 /// Install fonts (see fonts::apply_fonts)
-fn install_fonts(cc: &eframe::CreationContext<'_>, mono_choice: &str) {
-    fonts::apply_fonts(&cc.egui_ctx, mono_choice);
+fn install_fonts(cc: &eframe::CreationContext<'_>, mono_choice: &str, sharp: bool) {
+    fonts::apply_fonts(&cc.egui_ctx, mono_choice, sharp);
 }

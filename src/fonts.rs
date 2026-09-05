@@ -9,7 +9,7 @@ use egui::epaint::text::{FontData, FontTweak, HintingTarget, SmoothHinting};
 /// vertical stems soft. egui positions glyphs from the shaper's advances (not
 /// the hinted outline), so enabling horizontal grid-fitting costs no layout
 /// drift — only sharpness.
-fn sharp_font_data(bytes: Vec<u8>) -> FontData {
+fn sharp_font_data(bytes: Vec<u8>, sharp: bool) -> FontData {
     FontData {
         font: bytes.into(),
         index: 0,
@@ -18,7 +18,9 @@ fn sharp_font_data(bytes: Vec<u8>) -> FontData {
             hinting_target: HintingTarget::Smooth(SmoothHinting {
                 light: false,
                 symmetric_rendering: true,
-                preserve_linear_metrics: false,
+                // sharp: grid-fit horizontally (crisper stems);
+                // smooth: keep the font's unhinted proportions
+                preserve_linear_metrics: !sharp,
             }),
             ..Default::default()
         },
@@ -96,13 +98,13 @@ fn resolve_mono(choice: &str) -> Option<(&'static str, &'static str)> {
 
 /// (Re)install font families. Called at startup and whenever the terminal font
 /// setting changes.
-pub fn apply_fonts(ctx: &egui::Context, mono_choice: &str) {
+pub fn apply_fonts(ctx: &egui::Context, mono_choice: &str, sharp: bool) {
     let mut defs = egui::FontDefinitions::default();
 
     // Terminal monospace (crisper than egui's built-in unhinted monospace)
     if let Some((_label, path)) = resolve_mono(mono_choice) {
         if let Ok(bytes) = std::fs::read(path) {
-            defs.font_data.insert("term_mono".into(), Arc::new(sharp_font_data(bytes)));
+            defs.font_data.insert("term_mono".into(), Arc::new(sharp_font_data(bytes, sharp)));
             if let Some(family) = defs.families.get_mut(&egui::FontFamily::Monospace) {
                 family.insert(0, "term_mono".into());
             }
@@ -115,7 +117,7 @@ pub fn apply_fonts(ctx: &egui::Context, mono_choice: &str) {
             // The CJK font's glyphs sit higher in their em box than the Latin
             // terminal font; nudge them down so mixed lines align. Tunable via
             // XXSSHG_CJK_SHIFT (fraction of font size, default 0.12).
-            defs.font_data.insert("cjk_fallback".into(), Arc::new(sharp_font_data(bytes)));
+            defs.font_data.insert("cjk_fallback".into(), Arc::new(sharp_font_data(bytes, sharp)));
             defs.families
                 .entry(egui::FontFamily::Proportional)
                 .or_default()

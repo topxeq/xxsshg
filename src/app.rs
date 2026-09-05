@@ -1549,6 +1549,9 @@ impl XxsshgApp {
                                     }
                                 });
                             ui.end_row();
+                            ui.label(tr(lang, "s_sharp_font"));
+                            ui.checkbox(&mut self.gcfg.sharp_font, "");
+                            ui.end_row();
                         });
                     ui.add_space(6.0);
                     ui.horizontal(|ui| {
@@ -1570,7 +1573,7 @@ impl XxsshgApp {
                             if let Err(e) = save_settings(&self.settings_path, &self.settings) {
                                 self.toast(format!("save failed: {e}"));
                             }
-                            fonts::apply_fonts(&ctx, &self.gcfg.font_family);
+                            fonts::apply_fonts(&ctx, &self.gcfg.font_family, self.gcfg.sharp_font);
                             self.toast(tr(lang, "s_saved").into());
                             close = true;
                         }
