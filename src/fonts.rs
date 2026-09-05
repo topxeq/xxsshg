@@ -22,6 +22,10 @@ fn sharp_font_data(bytes: Vec<u8>, sharp: bool) -> FontData {
                 // smooth: keep the font's unhinted proportions
                 preserve_linear_metrics: !sharp,
             }),
+            // sharp: rasterize only at whole-pixel positions. The terminal
+            // places every cell on integer pixels, so egui's subpixel binning
+            // (1/4px glyph offsets) just adds a gray halo around each glyph.
+            subpixel_binning: if sharp { Some(false) } else { None },
             ..Default::default()
         },
     }
