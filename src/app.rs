@@ -367,8 +367,7 @@ impl XxsshgApp {
             .map(|s| s.name.clone());
         self.server_sort_asc = !self.server_sort_asc;
         let asc = self.server_sort_asc;
-        self.servers
-            .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        self.servers.sort_by_key(|s| s.name.to_lowercase());
         if !asc {
             self.servers.reverse();
         }
