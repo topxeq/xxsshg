@@ -281,8 +281,9 @@ pub struct XxsshgApp {
     about_open: bool,
     /// previous active tab (to auto-focus newly activated terminals)
     prev_active_tab: usize,
-    /// server list sort direction (name)
-    server_sort_asc: bool,
+    /// server list sort by name: Some(true)=asc, Some(false)=desc,
+    /// None = natural order (the order persisted in servers.json)
+    server_sort: Option<bool>,
     /// self-update dialog
     update_ui: UpdateUi,
     update_rx: Option<std::sync::mpsc::Receiver<UpdateMsg>>,
@@ -329,7 +330,7 @@ impl XxsshgApp {
             settings_open: false,
             about_open: false,
             prev_active_tab: 0,
-            server_sort_asc: true,
+            server_sort: None,
             update_ui: UpdateUi::Closed,
             update_rx: None,
             quit_confirm: false,
@@ -358,25 +359,32 @@ impl XxsshgApp {
 
     // -- actions -----------------------------------------------------------
 
-    /// sort servers by name (toggle asc/desc); keeps the selection on the same
-    /// server (by name) and persists the new order
-    fn sort_servers_by_name(&mut self) {
+    /// click handler for the sort button, 3-state: name asc → desc → natural
+    /// order. "natural" = the order persisted in servers.json (manual ordering
+    /// via 上移/下移); sorting is a view and is NOT written back.
+    fn cycle_server_sort(&mut self) {
         let selected_name = self
             .servers
             .get(self.selected_server)
             .map(|s| s.name.clone());
-        self.server_sort_asc = !self.server_sort_asc;
-        let asc = self.server_sort_asc;
-        self.servers.sort_by_key(|s| s.name.to_lowercase());
-        if !asc {
-            self.servers.reverse();
+        self.server_sort = match self.server_sort {
+            None => Some(true),
+            Some(true) => Some(false),
+            Some(false) => None,
+        };
+        match self.server_sort {
+            Some(true) => self.servers.sort_by_key(|s| s.name.to_lowercase()),
+            Some(false) => {
+                self.servers.sort_by_key(|s| s.name.to_lowercase());
+                self.servers.reverse();
+            }
+            None => self.servers = crate::xconfig::load(&self.servers_path),
         }
         if let Some(n) = selected_name {
             if let Some(pos) = self.servers.iter().position(|s| s.name == n) {
                 self.selected_server = pos;
             }
         }
-        self.persist_servers();
     }
 
     fn connect_server(&mut self, idx: usize) {
@@ -1043,14 +1051,18 @@ impl XxsshgApp {
                     self.form = Some(ServerForm::new());
                     self.form_open = true;
                 }
-                // sort by name; clicking again flips the direction
-                let arrow = if self.server_sort_asc { "▲" } else { "▼" };
+                // 3-state sort by name: asc ▲ → desc ▼ → natural order
+                let arrow = match self.server_sort {
+                    Some(true) => "▲",
+                    Some(false) => "▼",
+                    None => "",
+                };
                 if ui
                     .small_button(format!("⇅{arrow}"))
                     .on_hover_text(tpl(tr(self.lang(), "srv_sort_name"), &[]))
                     .clicked()
                 {
-                    self.sort_servers_by_name();
+                    self.cycle_server_sort();
                 }
             });
         });
