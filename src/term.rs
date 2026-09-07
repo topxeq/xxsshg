@@ -264,6 +264,60 @@ impl Terminal {
         SelPoint { line: row - self.display_offset() as i32, col }
     }
 
+    /// cell content at an absolute position (None when out of range)
+    fn cell_at(&self, line: i32, col: usize) -> Option<alacritty_terminal::term::cell::Cell> {
+        if col >= self.cols as usize {
+            return None;
+        }
+        Some(self.term.grid()[Line(line)][Column(col)].clone())
+    }
+
+    /// spacer cells belong to the preceding wide char and count as word content
+    fn is_word_cell(cell: &alacritty_terminal::term::cell::Cell) -> bool {
+        cell.c != ' ' || cell.flags.contains(Flags::WIDE_CHAR_SPACER)
+    }
+
+    /// expand a point to the whitespace-delimited word around it
+    fn expand_word(&self, p: SelPoint) -> (SelPoint, SelPoint) {
+        let mut start = p.col;
+        while start > 0
+            && self
+                .cell_at(p.line, start - 1)
+                .map_or(false, |c| Self::is_word_cell(&c))
+        {
+            start -= 1;
+        }
+        let mut end = p.col;
+        while end + 1 < self.cols as usize
+            && self
+                .cell_at(p.line, end + 1)
+                .map_or(false, |c| Self::is_word_cell(&c))
+        {
+            end += 1;
+        }
+        (
+            SelPoint { line: p.line, col: start },
+            SelPoint { line: p.line, col: end },
+        )
+    }
+
+    /// expand a point to the whole row (trailing blanks excluded)
+    fn expand_line(&self, p: SelPoint) -> (SelPoint, SelPoint) {
+        let mut end = 0usize;
+        for c in (0..self.cols as usize).rev() {
+            if let Some(cell) = self.cell_at(p.line, c) {
+                if Self::is_word_cell(&cell) {
+                    end = c;
+                    break;
+                }
+            }
+        }
+        (
+            SelPoint { line: p.line, col: 0 },
+            SelPoint { line: p.line, col: end },
+        )
+    }
+
     /// Extract the selected text in reading order
     fn selection_text(&self) -> Option<String> {
         let (a, b) = self.selection?;
@@ -657,13 +711,27 @@ impl Terminal {
                 }
             }
         }
-        // Double-click selects the word under the pointer (simple whitespace split)
+        // Double-click: select the word; triple-click: select the whole line
         if response.double_clicked() {
             if let Some(pos) = response.interact_pointer_pos() {
                 let p = self.point_from_pos(pos, origin);
-                self.selection = Some((p, p));
-                if let Some(text) = self.selection_text() {
-                    ui.ctx().copy_text(text);
+                let (a, b) = self.expand_word(p);
+                self.selection = Some((a, b));
+                if copy_on_select {
+                    if let Some(text) = self.selection_text() {
+                        ui.ctx().copy_text(text);
+                    }
+                }
+            }
+        } else if response.triple_clicked() {
+            if let Some(pos) = response.interact_pointer_pos() {
+                let p = self.point_from_pos(pos, origin);
+                let (a, b) = self.expand_line(p);
+                self.selection = Some((a, b));
+                if copy_on_select {
+                    if let Some(text) = self.selection_text() {
+                        ui.ctx().copy_text(text);
+                    }
                 }
             }
         }
