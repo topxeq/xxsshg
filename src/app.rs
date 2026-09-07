@@ -1051,15 +1051,22 @@ impl XxsshgApp {
                     self.form = Some(ServerForm::new());
                     self.form_open = true;
                 }
-                // 3-state sort by name: asc ▲ → desc ▼ → natural order
-                let arrow = match self.server_sort {
-                    Some(true) => "▲",
-                    Some(false) => "▼",
-                    None => "",
+                // 3-state sort by name: asc ▲ → desc ▼ → natural order.
+                // Text labels throughout: the ⇅ glyph is missing from the UI
+                // font and renders as a hollow box.
+                let label = match self.server_sort {
+                    Some(true) => format!("{} ▲", tr(self.lang(), "sort_name")),
+                    Some(false) => format!("{} ▼", tr(self.lang(), "sort_name")),
+                    None => tpl(tr(self.lang(), "srv_sort_name"), &[]),
+                };
+                let hover = match self.server_sort {
+                    Some(true) => tpl(tr(self.lang(), "srv_sort_hover_asc"), &[]),
+                    Some(false) => tpl(tr(self.lang(), "srv_sort_hover_desc"), &[]),
+                    None => tpl(tr(self.lang(), "srv_sort_hover_none"), &[]),
                 };
                 if ui
-                    .small_button(format!("⇅{arrow}"))
-                    .on_hover_text(tpl(tr(self.lang(), "srv_sort_name"), &[]))
+                    .small_button(egui::RichText::new(label).small())
+                    .on_hover_text(hover)
                     .clicked()
                 {
                     self.cycle_server_sort();
