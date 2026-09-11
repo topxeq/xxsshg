@@ -450,9 +450,6 @@ impl Terminal {
                 }
                 let wide = cell.flags.contains(Flags::WIDE_CHAR);
                 let ch = cell.c;
-                if ch == ' ' && !cell.flags.contains(Flags::INVERSE) && !wide {
-                    continue; // blank default cell: nothing to draw
-                }
 
                 let fg = self.resolve_color(cell.fg, ui);
                 let mut bg = self.resolve_color(cell.bg, ui);
@@ -466,12 +463,26 @@ impl Terminal {
                 let cells = if wide { 2.0 } else { 1.0 };
                 let w = cell_w * cells;
 
+                // NB: the background fill must happen BEFORE any blank-cell
+                // skip — spaces with only a bg color set (progress bars, table
+                // headers) used to lose their fill here, leaving one-cell holes
+                // inside colored runs.
                 if bg != default_bg || cell.flags.contains(Flags::INVERSE) {
                     painter.rect_filled(
                         egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, cell_h)),
                         0.0,
                         bg,
                     );
+                }
+
+                // blank default cell: the (already painted) background is all
+                // there is — skip the glyph
+                if ch == ' '
+                    && !cell.flags.contains(Flags::INVERSE)
+                    && !wide
+                    && bg == default_bg
+                {
+                    continue;
                 }
                 // CJK glyphs use the fallback font whose baseline differs from
                 // the Latin mono font; apply the precomputed em-fraction shift
