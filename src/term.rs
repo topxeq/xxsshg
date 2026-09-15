@@ -1103,6 +1103,14 @@ impl Terminal {
                     self.preedit = text.clone();
                 }
             }
+            // Any IME event in a frame means the raw keys of that frame were
+            // consumed by the IME itself and must never reach the remote.
+            // Without this, the LAST backspace of a composition leaks: the
+            // frame holds [Key(Backspace), Preedit("")] and the empty preedit
+            // alone re-opens the key path mid-composition, so the backspace
+            // deletes the previously committed character on top of the letter
+            // the IME just removed.
+            let ime_frame = events.iter().any(|ev| matches!(ev, egui::Event::Ime(_)));
             for ev in events {
                 match ev {
                     egui::Event::Ime(ime) => match ime {
@@ -1129,8 +1137,8 @@ impl Terminal {
                     // While the user is editing pinyin, winit still leaks the raw
                     // key events to us (egui only filters them when a TextEdit has
                     // focus) — dropping everything keeps the remote untouched.
-                    egui::Event::Key { .. } if self.composing => {}
-                    egui::Event::Text(_) if self.composing => {}
+                    egui::Event::Key { .. } if self.composing || ime_frame => {}
+                    egui::Event::Text(_) if self.composing || ime_frame => {}
                     egui::Event::Text(text) => {
                         // Printable / IME-committed text
                         let bytes = text
