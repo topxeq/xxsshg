@@ -25,14 +25,14 @@ xxssh 的 GUI 版本：轻量级图形 SSH 客户端，与 [xxssh](../repo) **�
 ```bash
 cargo build --release
 # 产物：target/release/xxsshg.exe（单文件）
-cargo test    # 26 个测试，含与 xxssh 的格式契约测试
+cargo test    # 42 个测试，含与 xxssh 的格式契约测试
 ```
 
 ## 使用
 
 1. 启动后左侧自动加载 xxssh 已保存的服务器列表
 2. 单击选中，双击或点 Connect 连接；New/Edit/Delete 管理服务器
-3. 终端内：拖选复制（可在设置关闭）、`Ctrl+Shift+C/V` 复制粘贴、`Ctrl+滚轮` 无、滚轮回滚历史（alt-screen 程序自动转方向键）
+3. 终端内：拖选复制（可在设置关闭）、`Ctrl+Shift+C/V` 复制粘贴、滚轮回滚历史；alt-screen 程序自动转方向键，申请了鼠标上报的程序（tmux/opencode/htop…）收到的则是原生鼠标事件（`Shift`+鼠标绕过）；`Ctrl+Shift+K` 清屏清回滚；`Ctrl+Shift+R` 重置异常退出的全屏程序遗留的终端模式
 4. Settings 中可切换语言/主题/字号/回滚行数/铃声，保存写入 gui.json 与 settings.json
 
 ## 代码结构

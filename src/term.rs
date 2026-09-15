@@ -1,7 +1,8 @@
 //! Terminal widget: alacritty_terminal grid model rendered with egui.
 //!
 //! Byte flow: PTY output -> `feed()` -> vte processor -> Term grid -> `paint()`.
-//! Input flow: egui keyboard/IME events -> `encode_key`/UTF-8 bytes -> session input.
+//! Input flow: egui keyboard/mouse/IME events -> `encode_key`/`mouse_report`/
+//! UTF-8 bytes -> session input.
 //! Terminal query responses (cursor position report, DA1, etc.) arrive as
 //! `Event::PtyWrite` from the model and are routed back through the same input
 //! channel — this is what keeps vim/tmux working.
@@ -116,6 +117,13 @@ struct SelPoint {
     col: usize,
 }
 
+/// Display-side mode reset fed by Ctrl+Shift+R when a crashed fullscreen app
+/// left modes stuck: leave alt screen (47/1047/1049), application cursor keys
+/// (?1), show cursor (?25), stop mouse reporting (1000/1002/1003 and the
+/// encodings 1005/1006/1015), bracketed paste (?2004).
+const MODE_RESET: &[u8] = b"\x1b[?1049l\x1b[?1047l\x1b[?47l\x1b[?1l\x1b[?25h\
+\x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?2004l";
+
 pub struct Terminal {
     pub term: Term<EventProxy>,
     parser: Processor,
@@ -157,6 +165,14 @@ pub struct Terminal {
     pub pending_new_cmd: bool,
     /// Scrollbar thumb drag: grab offset within the thumb (px)
     scroll_drag: Option<f32>,
+    /// Last viewport cell a motion report was sent for (dedup, xterm-style
+    /// reports are per cell change, not per pixel)
+    last_motion_cell: Option<(usize, usize)>,
+    /// Set while a mouse-report press is outstanding (left/middle), so the
+    /// matching release is delivered even outside the widget / over the
+    /// scrollbar / after a Shift pause
+    report_left_down: bool,
+    report_middle_down: bool,
     /// last logged render-metrics tuple (ppp, font_size, cell_w, cell_h) bits
     last_metrics: Option<(u32, u32, u32, u32)>,
 }
@@ -201,6 +217,9 @@ impl Terminal {
                 pending_close_tab: false,
                 pending_new_cmd: false,
                 scroll_drag: None,
+                last_motion_cell: None,
+                report_left_down: false,
+                report_middle_down: false,
                 last_metrics: None,
             },
             title_rx,
@@ -226,6 +245,13 @@ impl Terminal {
     /// cursor home, erase viewport, erase scrollback.
     pub fn clear_scrollback(&mut self) {
         self.feed(b"\x1b[H\x1b[2J\x1b[3J");
+    }
+
+    /// Reset display-side terminal modes that a crashed fullscreen app may
+    /// have left behind. Nothing reaches the PTY — same idea as
+    /// Ctrl+Shift+K, but for modes instead of pixels. See `MODE_RESET`.
+    pub fn reset_modes(&mut self) {
+        self.feed(MODE_RESET);
     }
 
     /// Resize the grid; returns true if the size actually changed
@@ -262,6 +288,16 @@ impl Terminal {
         let row = (((pos.y - origin.y) / self.cell_h).floor() as i32)
             .clamp(0, self.rows as i32 - 1) as i32;
         SelPoint { line: row - self.display_offset() as i32, col }
+    }
+
+    /// Viewport cell coordinates (0-based, clamped to the grid) for a window
+    /// position — what xterm mouse reports carry.
+    fn cell_from_pos(&self, pos: egui::Pos2, origin: egui::Pos2) -> (usize, usize) {
+        let col = (((pos.x - origin.x) / self.cell_w).floor() as i32)
+            .clamp(0, self.cols as i32 - 1) as usize;
+        let row = (((pos.y - origin.y) / self.cell_h).floor() as i32)
+            .clamp(0, self.rows as i32 - 1) as usize;
+        (col, row)
     }
 
     /// cell content at an absolute position (None when out of range)
@@ -666,10 +702,11 @@ impl Terminal {
             self.focus_pending = false;
             response.request_focus();
         }
+        let mode = self.term.mode().clone();
+
         // Right-click: copy when there is a selection, paste when there is none.
         // Plain left-click always clears an existing selection.
         if response.secondary_clicked() {
-            let mode = self.term.mode().clone();
             if let Some(text) = self.selection_text() {
                 ui.ctx().copy_text(text);
                 self.selection = None;
@@ -681,82 +718,189 @@ impl Terminal {
                 }
             }
         }
+        // The window can end up "active but without keyboard focus" (the
+        // auto-focus fires while the window is backgrounded, an RDP focus
+        // glitch, ...): the window looks foreground, egui even keeps the
+        // terminal focused, but the OS routes every keystroke elsewhere —
+        // typing silently does nothing and the cursor renders unfocused.
+        // A press into the terminal is the user asking for the keyboard
+        // back, so demand OS focus (at press time — a plain click is not
+        // guaranteed to complete inside the widget).
+        let win_unfocused = !ui.input(|i| i.viewport().focused.unwrap_or(true));
+        if win_unfocused && response.drag_started() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
+            crate::diag::log("viewport focus requested (window active but unfocused)");
+        }
         if response.clicked() {
             response.request_focus();
             self.selection = None;
         }
 
-        // Mouse selection
-        if response.drag_started() {
-            if let Some(pos) = response.interact_pointer_pos() {
-                self.drag_anchor = Some(self.point_from_pos(pos, origin));
-                self.selection = None;
+        let mods_now = ui.input(|i| i.modifiers);
+
+        // Mouse reporting (xterm mouse protocol): an app that turned on mode
+        // 1000/1002/1003 wants mouse events instead of local mouse behavior.
+        // Shift bypasses it (escape hatch for local selection); the right
+        // button always stays local (copy/paste) — apps never see it.
+        let report_mouse = mode.intersects(TermMode::MOUSE_MODE) && !mods_now.shift;
+        let sgr = mode.contains(TermMode::SGR_MOUSE);
+        // The scrollbar strip is ours, never the app's: no reports from there.
+        let scrollbar_active = self.term.grid().total_lines() > self.rows as usize;
+        let in_scrollbar = |pos: egui::Pos2| scrollbar_active && pos.x >= rect.max.x - 8.0;
+
+        if report_mouse {
+            // Button press/release reports, from the raw pointer events
+            // (response.clicked() etc. don't expose press AND release).
+            // Releases are delivered wherever they happen once the press was
+            // reported — the app must never keep a phantom button held.
+            let events = ui.input(|i| i.events.clone());
+            for ev in &events {
+                if let egui::Event::PointerButton { pos, button, pressed, modifiers: m } = ev {
+                    let b: u8 = match button {
+                        egui::PointerButton::Primary => 0,
+                        egui::PointerButton::Middle => 1,
+                        _ => continue, // Secondary (right) stays local copy/paste
+                    };
+                    let was_down = if b == 0 { self.report_left_down } else { self.report_middle_down };
+                    if *pressed {
+                        // Shift+press = local selection, so no report
+                        if m.shift || !rect.contains(*pos) || in_scrollbar(*pos) {
+                            continue;
+                        }
+                        let (col, row) = self.cell_from_pos(*pos, origin);
+                        self.write(&mouse_report(b, MouseEvt::Press, col, row, sgr));
+                        if b == 0 { self.report_left_down = true } else { self.report_middle_down = true }
+                        self.last_motion_cell = Some((col, row));
+                    } else if was_down {
+                        let (col, row) = self.cell_from_pos(*pos, origin);
+                        self.write(&mouse_report(b, MouseEvt::Release, col, row, sgr));
+                        if b == 0 { self.report_left_down = false } else { self.report_middle_down = false }
+                        self.last_motion_cell = None;
+                    }
+                }
             }
-        } else if response.dragged() {
-            if let (Some(anchor), Some(pos)) = (self.drag_anchor, response.interact_pointer_pos()) {
-                // Auto-scroll when the pointer moves past the top/bottom edge so
-                // a selection can span more than one screen: scroll a few lines
-                // per frame (faster the further out the pointer is) and let the
-                // moving endpoint ride the new edge via the updated offset.
-                let rect = response.rect;
-                let speed: i32 = if pos.y < rect.top() {
-                    ((rect.top() - pos.y) / self.cell_h).ceil() as i32
-                } else if pos.y > rect.bottom() {
-                    -(((pos.y - rect.bottom()) / self.cell_h).ceil() as i32)
+            // Drag/hover motion reports, xterm-style: on cell change, not on
+            // every pointer move. Button motion needs mode 1002/1003, no-button
+            // hover motion only 1003.
+            if mode.intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) {
+                let (pos, l_down, any_down) = ui.input(|i| {
+                    (i.pointer.interact_pos(), i.pointer.primary_down(), i.pointer.any_down())
+                });
+                let cell = pos
+                    .filter(|p| rect.contains(*p) && !in_scrollbar(*p))
+                    .map(|p| self.cell_from_pos(p, origin));
+                if let Some((col, row)) = cell {
+                    if self.last_motion_cell != Some((col, row)) {
+                        let b: Option<u8> = if any_down {
+                            l_down.then_some(0u8) // right/middle drags stay local
+                        } else if mode.contains(TermMode::MOUSE_MOTION) {
+                            Some(3u8) // no-button hover motion
+                        } else {
+                            None
+                        };
+                        if let Some(b) = b {
+                            self.write(&mouse_report(b, MouseEvt::Motion, col, row, sgr));
+                            self.last_motion_cell = Some((col, row));
+                        }
+                    }
                 } else {
-                    0
-                };
-                let speed = speed.clamp(-8, 8);
-                if speed != 0 && !self.term.mode().contains(TermMode::ALT_SCREEN) {
-                    // same direction convention as the wheel: +delta = older lines
-                    self.term.scroll_display(Scroll::Delta(speed));
-                    ui.ctx().request_repaint();
-                }
-                let cur = self.point_from_pos(pos, origin);
-                self.selection = Some((anchor, cur));
-            }
-        } else if response.drag_stopped() {
-            if copy_on_select {
-                if let Some(text) = self.selection_text() {
-                    ui.ctx().copy_text(text);
+                    // pointer left the terminal: re-report on re-entry
+                    self.last_motion_cell = None;
                 }
             }
-        }
-        // Double-click: select the word; triple-click: select the whole line
-        if response.double_clicked() {
-            if let Some(pos) = response.interact_pointer_pos() {
-                let p = self.point_from_pos(pos, origin);
-                let (a, b) = self.expand_word(p);
-                self.selection = Some((a, b));
+        } else {
+            self.last_motion_cell = None;
+            // Mouse selection (local)
+            if response.drag_started() {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    self.drag_anchor = Some(self.point_from_pos(pos, origin));
+                    self.selection = None;
+                }
+            } else if response.dragged() {
+                if let (Some(anchor), Some(pos)) = (self.drag_anchor, response.interact_pointer_pos()) {
+                    // Auto-scroll when the pointer moves past the top/bottom edge so
+                    // a selection can span more than one screen: scroll a few lines
+                    // per frame (faster the further out the pointer is) and let the
+                    // moving endpoint ride the new edge via the updated offset.
+                    let rect = response.rect;
+                    let speed: i32 = if pos.y < rect.top() {
+                        ((rect.top() - pos.y) / self.cell_h).ceil() as i32
+                    } else if pos.y > rect.bottom() {
+                        -(((pos.y - rect.bottom()) / self.cell_h).ceil() as i32)
+                    } else {
+                        0
+                    };
+                    let speed = speed.clamp(-8, 8);
+                    if speed != 0 && !self.term.mode().contains(TermMode::ALT_SCREEN) {
+                        // same direction convention as the wheel: +delta = older lines
+                        self.term.scroll_display(Scroll::Delta(speed));
+                        ui.ctx().request_repaint();
+                    }
+                    let cur = self.point_from_pos(pos, origin);
+                    self.selection = Some((anchor, cur));
+                }
+            } else if response.drag_stopped() {
                 if copy_on_select {
                     if let Some(text) = self.selection_text() {
                         ui.ctx().copy_text(text);
                     }
                 }
             }
-        } else if response.triple_clicked() {
-            if let Some(pos) = response.interact_pointer_pos() {
-                let p = self.point_from_pos(pos, origin);
-                let (a, b) = self.expand_line(p);
-                self.selection = Some((a, b));
-                if copy_on_select {
-                    if let Some(text) = self.selection_text() {
-                        ui.ctx().copy_text(text);
+            // Double-click: select the word; triple-click: select the whole line
+            if response.double_clicked() {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    let p = self.point_from_pos(pos, origin);
+                    let (a, b) = self.expand_word(p);
+                    self.selection = Some((a, b));
+                    if copy_on_select {
+                        if let Some(text) = self.selection_text() {
+                            ui.ctx().copy_text(text);
+                        }
+                    }
+                }
+            } else if response.triple_clicked() {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    let p = self.point_from_pos(pos, origin);
+                    let (a, b) = self.expand_line(p);
+                    self.selection = Some((a, b));
+                    if copy_on_select {
+                        if let Some(text) = self.selection_text() {
+                            ui.ctx().copy_text(text);
+                        }
                     }
                 }
             }
         }
 
-        // Scroll wheel: history scroll, or arrow keys in alternate screen (less/tmux)
-        let mode = self.term.mode().clone();
+        // Scroll wheel, three cases in precedence order:
+        // 1. App requested mouse reporting (tmux/opencode/htop...): send wheel
+        //    reports so the app scrolls itself.
+        // 2. Alternate screen (less/vim, no mouse reporting): arrow keys.
+        // 3. Otherwise: scroll the local history.
         if response.hovered() {
-            let scroll = ui.input(|i| i.smooth_scroll_delta.y);
+            let delta = ui.input(|i| i.smooth_scroll_delta);
+            // egui routes Shift+wheel to the horizontal axis (line scroll);
+            // treat it as vertical here — Shift means "bypass mouse reporting".
+            let scroll = if mods_now.shift && delta.y.abs() <= 0.5 { delta.x } else { delta.y };
             if scroll.abs() > 0.5 {
                 let dir: i32 = if invert_scrolling { -1 } else { 1 };
                 let lines = ((scroll / cell_h).round() as i32) * dir;
-                if mode.contains(TermMode::ALT_SCREEN) {
+                if report_mouse {
+                    if let Some(pos) = response.hover_pos() {
+                        let (col, row) = self.cell_from_pos(pos, origin);
+                        for _ in 0..lines.abs().min(10) {
+                            let report = mouse_wheel_report(lines > 0, col, row, sgr);
+                            self.write(&report);
+                        }
+                    }
+                } else if mode.contains(TermMode::ALT_SCREEN) {
+                    let seq: &[u8] = match (lines > 0, mode.contains(TermMode::APP_CURSOR)) {
+                        (true, false) => b"\x1b[A",
+                        (true, true) => b"\x1bOA",
+                        (false, false) => b"\x1b[B",
+                        (false, true) => b"\x1bOB",
+                    };
                     for _ in 0..lines.abs().min(10) {
-                        let seq: &[u8] = if lines > 0 { b"\x1b[A" } else { b"\x1b[B" };
                         self.write(seq);
                     }
                 } else if lines != 0 {
@@ -778,13 +922,28 @@ impl Terminal {
         let focused = response.has_focus();
         if self.last_focus_logged != Some(focused) {
             self.last_focus_logged = Some(focused);
+            let mem_focus = ui.memory(|mem| mem.focused().map(|id| id.short_debug_format()));
+            let win_focus = ui.input(|i| i.viewport().focused);
             crate::diag::log(&format!(
-                "terminal focus: {} (click the terminal to focus it)",
-                focused
+                "terminal focus: {} (click the terminal to focus it) widget={:?} mem_focus={:?} win_focus={:?} composing={} preedit={:?}",
+                focused,
+                response.id.short_debug_format(),
+                mem_focus,
+                win_focus,
+                self.composing,
+                self.preedit,
             ));
         }
         // Claim exclusive access to Tab / arrows / Escape while focused, so egui
         // does not use them for focus navigation (Tab used to jump to the sidebar)
+        if !focused && self.composing {
+            // Focus was lost mid-composition: the IME cancels the pinyin on
+            // deactivation, and with no Preedit("") arriving the composing
+            // latch would stay on — silently swallowing every later keypress.
+            self.composing = false;
+            self.preedit.clear();
+            crate::diag::log("IME composition reset (focus lost mid-composition)");
+        }
         if focused {
             ui.memory_mut(|mem| {
                 mem.set_focus_lock_filter(
@@ -906,6 +1065,14 @@ impl Terminal {
                         // Terminal convention; display-side only)
                         if modifiers.ctrl && modifiers.shift && !modifiers.alt && key == egui::Key::K {
                             self.clear_scrollback();
+                            continue;
+                        }
+                        // Ctrl+Shift+R: reset stuck terminal modes — a crashed
+                        // fullscreen app can leave alt screen / mouse reporting
+                        // on, making wheel=arrows forever. Display-side only
+                        // (plain Ctrl+R still reaches the shell).
+                        if modifiers.ctrl && modifiers.shift && !modifiers.alt && key == egui::Key::R {
+                            self.reset_modes();
                             continue;
                         }
                         // Home/End scroll the local buffer to head/tail (user
@@ -1041,6 +1208,48 @@ fn default_palette(index: usize) -> Rgb {
     }
 }
 
+/// Kind of xterm mouse event to report.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MouseEvt {
+    Press,
+    Release,
+    Motion,
+}
+
+/// One xterm mouse report for `button` (0 left, 1 middle, 2 right, 3 no-button
+/// hover, 64/65 wheel up/down). col/row are 0-based viewport cell coordinates;
+/// encoded as SGR when mode 1006 is on, legacy X10 bytes otherwise.
+fn mouse_report(button: u8, evt: MouseEvt, col: usize, row: usize, sgr: bool) -> Vec<u8> {
+    if sgr {
+        let b = match evt {
+            MouseEvt::Motion => button + 32,
+            _ => button,
+        };
+        let suffix = if evt == MouseEvt::Release { 'm' } else { 'M' };
+        format!("\x1b[<{b};{};{}{suffix}", col + 1, row + 1).into_bytes()
+    } else {
+        let b: u8 = match evt {
+            MouseEvt::Press => button,
+            MouseEvt::Release => button + 3,
+            MouseEvt::Motion => button + 32,
+        };
+        // ESC [ M b cx cy — bytes are 1-based coords + 32, capped at 223
+        vec![
+            0x1b,
+            b'[',
+            b'M',
+            32 + b,
+            (32 + (col + 1).min(223)) as u8,
+            (32 + (row + 1).min(223)) as u8,
+        ]
+    }
+}
+
+/// Mouse wheel report (button 64 = up, 65 = down), press-only.
+fn mouse_wheel_report(up: bool, col: usize, row: usize, sgr: bool) -> Vec<u8> {
+    mouse_report(if up { 64 } else { 65 }, MouseEvt::Press, col, row, sgr)
+}
+
 /// Convert an egui key press to the bytes a real terminal would send.
 /// `mode` decides application-cursor / application-keypad variants.
 fn encode_key(key: egui::Key, mods: &egui::Modifiers, mode: &TermMode) -> Option<Vec<u8>> {
@@ -1116,6 +1325,63 @@ fn encode_key(key: egui::Key, mods: &egui::Modifiers, mode: &TermMode) -> Option
         Key::F12 => b"\x1b[24~".to_vec(),
         _ => return None,
     })
+}
+
+#[cfg(test)]
+mod wheel_report_tests {
+    use super::*;
+
+    #[test]
+    fn sgr_encoding_is_one_based_press_only() {
+        assert_eq!(mouse_wheel_report(true, 0, 0, true), b"\x1b[<64;1;1M");
+        assert_eq!(mouse_wheel_report(false, 79, 23, true), b"\x1b[<65;80;24M");
+    }
+
+    #[test]
+    fn x10_encoding_offsets_and_caps_at_223() {
+        // button byte = 32+64/65, coords = 1-based + 32
+        assert_eq!(mouse_wheel_report(true, 0, 0, false), b"\x1b[M\x60\x21\x21");
+        assert_eq!(mouse_wheel_report(false, 9, 4, false), b"\x1b[M\x61\x2a\x25");
+        // xterm caps X10 coordinates at 223 (byte 255)
+        assert_eq!(mouse_wheel_report(true, 300, 300, false), b"\x1b[M\x60\xff\xff");
+    }
+
+    #[test]
+    fn button_reports_press_release_motion() {
+        use MouseEvt::*;
+        // SGR: release uses 'm', motion adds 32 to the button, coords 1-based
+        assert_eq!(mouse_report(0, Press, 4, 2, true), b"\x1b[<0;5;3M");
+        assert_eq!(mouse_report(0, Release, 4, 2, true), b"\x1b[<0;5;3m");
+        assert_eq!(mouse_report(0, Motion, 4, 2, true), b"\x1b[<32;5;3M");
+        // X10: release = button+3, motion = button+32, every byte shifted +32
+        assert_eq!(mouse_report(0, Press, 0, 0, false), b"\x1b[M\x20\x21\x21");
+        assert_eq!(mouse_report(0, Release, 0, 0, false), b"\x1b[M\x23\x21\x21");
+        // no-button hover motion (button 3)
+        assert_eq!(mouse_report(3, Motion, 9, 4, false), b"\x1b[M\x43\x2a\x25");
+    }
+
+    #[test]
+    fn mode_reset_sequence_is_valid_private_csi_list() {
+        let s = String::from_utf8(MODE_RESET.to_vec()).unwrap();
+        assert!(s.starts_with("\x1b[?1049l"), "must leave the alt screen first");
+        let mut saw_mouse_off = false;
+        for seq in s.split("\x1b[") {
+            if seq.is_empty() {
+                continue;
+            }
+            let body = seq.strip_prefix('?').expect("private-mode marker");
+            let (num, kind) = body.split_at(body.len() - 1);
+            assert!(!num.is_empty() && num.bytes().all(|b| b.is_ascii_digit()), "bad mode: {num:?}");
+            assert!(num.parse::<u16>().is_ok());
+            // everything is unset ("l") except ?25h, which SHOWS the cursor
+            let expected_kind = if num == "25" { "h" } else { "l" };
+            assert_eq!(kind, expected_kind, "bad final byte on mode {num}");
+            if matches!(num, "1000" | "1002" | "1003") {
+                saw_mouse_off = true;
+            }
+        }
+        assert!(saw_mouse_off, "mouse reporting must be unset");
+    }
 }
 
 #[cfg(test)]
