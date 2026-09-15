@@ -15,6 +15,84 @@ use alacritty_terminal::term::{Config as TermConfig, Term, TermMode};
 use alacritty_terminal::vte::ansi::{Color, NamedColor, Processor, Rgb};
 use tokio::sync::mpsc;
 
+// ---------------------------------------------------------------------------
+// OS keyboard-focus recovery (Windows)
+// ---------------------------------------------------------------------------
+
+/// Bring keyboard focus back to our window when Windows is in the
+/// "window active but keyboard focus elsewhere" limbo (auto-focus fired while
+/// backgrounded, RDP focus glitches, ...). A plain `SetForegroundWindow` from
+/// outside the foreground process is downgraded to a taskbar flash — winit's
+/// `focus_window` hits exactly that — so: find our own HWND (EnumWindows by
+/// process id), grant the foreground right with a synthetic ALT tap, then
+/// `SetFocus` on our own thread's window, which is always permitted and
+/// points the input queue's focus back home.
+#[cfg(windows)]
+pub mod win32_focus {
+    use std::sync::atomic::{AtomicIsize, Ordering};
+
+    #[link(name = "user32")]
+    extern "system" {
+        fn keybd_event(bvk: u8, bscan: u8, dwflags: u32, dwextrainfo: usize);
+        fn SetForegroundWindow(hwnd: isize) -> i32;
+        fn SetFocus(hwnd: isize) -> isize;
+        fn EnumWindows(cb: Option<unsafe extern "system" fn(isize, isize) -> i32>, lparam: isize) -> i32;
+        fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
+        fn IsWindowVisible(hwnd: isize) -> i32;
+        fn GetCurrentProcessId() -> u32;
+    }
+    const VK_MENU: u8 = 0x12;
+    const KEYEVENTF_KEYUP: u32 = 2;
+
+    static OUR_HWND: AtomicIsize = AtomicIsize::new(0);
+
+    unsafe extern "system" fn enum_cb(hwnd: isize, _lparam: isize) -> i32 {
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid == GetCurrentProcessId() && IsWindowVisible(hwnd) != 0 {
+            OUR_HWND.store(hwnd, Ordering::Relaxed);
+            return 0; // stop at the first visible top-level window of this process
+        }
+        1
+    }
+
+    /// Returns a short diagnostic description of what was done.
+    pub fn demand_keyboard_focus() -> String {
+        let mut hwnd = OUR_HWND.load(Ordering::Relaxed);
+        if hwnd == 0 {
+            unsafe { EnumWindows(Some(enum_cb), 0) };
+            hwnd = OUR_HWND.load(Ordering::Relaxed);
+        }
+        if hwnd == 0 {
+            return "hwnd-not-found".into();
+        }
+        unsafe {
+            keybd_event(VK_MENU, 0, 0, 0);
+            let ok = SetForegroundWindow(hwnd);
+            keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
+            SetFocus(hwnd);
+            format!("hwnd={hwnd:#x} setfg={ok}")
+        }
+    }
+}
+
+/// Demand OS keyboard focus for our window: the in-process win32 combo on
+/// Windows (survives the foreground lock), the egui viewport command
+/// elsewhere.
+#[cfg(windows)]
+fn demand_os_focus(ui: &egui::Ui) {
+    let info = win32_focus::demand_keyboard_focus();
+    if info == "hwnd-not-found" {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
+    }
+    crate::diag::log(&format!("focus demand: {info}"));
+}
+
+#[cfg(not(windows))]
+fn demand_os_focus(ui: &egui::Ui) {
+    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
+}
+
 /// Diagnostic cursor/IO log. Off unless XXSSHG_DEBUG_CURSOR=1
 /// (log: ~/.xxssh/cursor-debug.log).
 pub fn diag_log(msg: &str) {
@@ -173,6 +251,10 @@ pub struct Terminal {
     /// scrollbar / after a Shift pause
     report_left_down: bool,
     report_middle_down: bool,
+    /// OS-focus recovery: how many demands were made in the current stuck
+    /// episode (reset once the window is keyboard-focused again)
+    focus_demands: u32,
+    last_focus_demand: Option<std::time::Instant>,
     /// last logged render-metrics tuple (ppp, font_size, cell_w, cell_h) bits
     last_metrics: Option<(u32, u32, u32, u32)>,
 }
@@ -220,6 +302,8 @@ impl Terminal {
                 last_motion_cell: None,
                 report_left_down: false,
                 report_middle_down: false,
+                focus_demands: 0,
+                last_focus_demand: None,
                 last_metrics: None,
             },
             title_rx,
@@ -701,6 +785,13 @@ impl Terminal {
         if self.focus_pending {
             self.focus_pending = false;
             response.request_focus();
+            // Auto-focus must also reach the OS: egui-side focus is worthless
+            // while the window lacks keyboard focus (keys go nowhere, cursor
+            // renders unfocused). Same stuck state as the press handler below.
+            if !ui.input(|i| i.viewport().focused.unwrap_or(true)) {
+                demand_os_focus(ui);
+                crate::diag::log("viewport focus requested (tab opened/switched while window unfocused)");
+            }
         }
         let mode = self.term.mode().clone();
 
@@ -724,12 +815,36 @@ impl Terminal {
         // terminal focused, but the OS routes every keystroke elsewhere —
         // typing silently does nothing and the cursor renders unfocused.
         // A press into the terminal is the user asking for the keyboard
-        // back, so demand OS focus (at press time — a plain click is not
-        // guaranteed to complete inside the widget).
+        // back. NB: this must fire at PRESS time — egui only reports
+        // drag_started after pointer movement, which a plain focus-click
+        // never does.
         let win_unfocused = !ui.input(|i| i.viewport().focused.unwrap_or(true));
-        if win_unfocused && response.drag_started() {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
-            crate::diag::log("viewport focus requested (window active but unfocused)");
+        if win_unfocused {
+            let pointer_in_rect = ui
+                .input(|i| i.pointer.interact_pos())
+                .is_some_and(|p| rect.contains(p));
+            let press_now = ui.input(|i| i.pointer.any_pressed()) && pointer_in_rect;
+            // First demand needs a press (no focus stealing on mere hover);
+            // afterwards retry every 0.6s while the pointer stays here, so a
+            // lost race against the foreground lock still converges.
+            let retry_due = self
+                .last_focus_demand
+                .map_or(false, |t| t.elapsed().as_millis() >= 600);
+            if pointer_in_rect
+                && self.focus_demands < 8
+                && (press_now || (self.focus_demands > 0 && retry_due))
+            {
+                demand_os_focus(ui);
+                self.focus_demands += 1;
+                self.last_focus_demand = Some(std::time::Instant::now());
+                crate::diag::log(&format!(
+                    "viewport focus requested (press into terminal while window unfocused, attempt {})",
+                    self.focus_demands
+                ));
+            }
+        } else {
+            self.focus_demands = 0;
+            self.last_focus_demand = None;
         }
         if response.clicked() {
             response.request_focus();
