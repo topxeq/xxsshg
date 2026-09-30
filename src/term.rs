@@ -255,6 +255,9 @@ pub struct Terminal {
     /// episode (reset once the window is keyboard-focused again)
     focus_demands: u32,
     last_focus_demand: Option<std::time::Instant>,
+    /// Last IME cursor rect sent to the OS (dedup: viewport commands each
+    /// request a repaint, so resending the same rect is a repaint loop)
+    last_ime_rect: Option<egui::Rect>,
     /// last logged render-metrics tuple (ppp, font_size, cell_w, cell_h) bits
     last_metrics: Option<(u32, u32, u32, u32)>,
 }
@@ -304,6 +307,7 @@ impl Terminal {
                 report_middle_down: false,
                 focus_demands: 0,
                 last_focus_demand: None,
+                last_ime_rect: None,
                 last_metrics: None,
             },
             title_rx,
@@ -367,11 +371,23 @@ impl Terminal {
     // -- selection ---------------------------------------------------------
 
     fn point_from_pos(&self, pos: egui::Pos2, origin: egui::Pos2) -> SelPoint {
-        let col = (((pos.x - origin.x) / self.cell_w).floor() as i32)
+        let mut col = (((pos.x - origin.x) / self.cell_w).floor() as i32)
             .clamp(0, self.cols as i32 - 1) as usize;
         let row = (((pos.y - origin.y) / self.cell_h).floor() as i32)
             .clamp(0, self.rows as i32 - 1) as i32;
-        SelPoint { line: row - self.display_offset() as i32, col }
+        // A click on the second half of a double-width char lands on its
+        // spacer cell — select the wide char itself, not the next cell.
+        // Without this, aiming at a CJK char's right half selects the char
+        // after it (feels like everything is half a character off).
+        let line_abs = row - self.display_offset() as i32;
+        if col > 0
+            && self.term.grid()[Line(line_abs)][Column(col)]
+                .flags
+                .contains(Flags::WIDE_CHAR_SPACER)
+        {
+            col -= 1;
+        }
+        SelPoint { line: line_abs, col }
     }
 
     /// Viewport cell coordinates (0-based, clamped to the grid) for a window
@@ -563,21 +579,21 @@ impl Terminal {
             let grid_row = &grid[Line(line_abs)];
             let y = q(origin.y + row_i as f32 * cell_h);
 
-            for col_i in 0..self.cols as usize {
+            let mut col_i = 0usize;
+            while col_i < self.cols as usize {
                 let cell = &grid_row[Column(col_i)];
                 if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    col_i += 1;
                     continue;
                 }
                 let wide = cell.flags.contains(Flags::WIDE_CHAR);
-                let ch = cell.c;
-
-                let fg = self.resolve_color(cell.fg, ui);
+                let inverse = cell.flags.contains(Flags::INVERSE);
+                let underline = cell.flags.intersects(Flags::UNDERLINE);
+                let mut fg = self.resolve_color(cell.fg, ui);
                 let mut bg = self.resolve_color(cell.bg, ui);
-                let mut fg = fg;
-                if cell.flags.contains(Flags::INVERSE) {
+                if inverse {
                     std::mem::swap(&mut fg, &mut bg);
                 }
-                let underline = cell.flags.intersects(Flags::UNDERLINE);
 
                 let x = q(origin.x + col_i as f32 * cell_w);
                 let cells = if wide { 2.0 } else { 1.0 };
@@ -587,7 +603,7 @@ impl Terminal {
                 // skip — spaces with only a bg color set (progress bars, table
                 // headers) used to lose their fill here, leaving one-cell holes
                 // inside colored runs.
-                if bg != default_bg || cell.flags.contains(Flags::INVERSE) {
+                if bg != default_bg || inverse {
                     painter.rect_filled(
                         egui::Rect::from_min_size(egui::pos2(x, y), egui::vec2(w, cell_h)),
                         0.0,
@@ -595,13 +611,52 @@ impl Terminal {
                     );
                 }
 
+                // Batch a run of same-style plain-ASCII cells into ONE text
+                // draw: painting each cell separately meant thousands of
+                // single-glyph shapes and String allocs per frame — the
+                // dominant render cost. Runs break at anything that could
+                // need a fallback font (CJK, box drawing) or a style change
+                // (inverse, underline, colored bg); those take the exact
+                // per-cell path below, so fallback-font metrics can never
+                // drift batched glyphs off the grid.
+                if !wide
+                    && !inverse
+                    && !underline
+                    && bg == default_bg
+                    && (0x20..=0x7e).contains(&(cell.c as u32))
+                {
+                    let run_fg = fg;
+                    let start_col = col_i;
+                    let mut run = String::with_capacity(48);
+                    while col_i < self.cols as usize {
+                        let c = &grid_row[Column(col_i)];
+                        if c.flags.contains(Flags::WIDE_CHAR)
+                            || c.flags.contains(Flags::WIDE_CHAR_SPACER)
+                            || c.flags.contains(Flags::INVERSE)
+                            || c.flags.intersects(Flags::UNDERLINE)
+                            || !(0x20..=0x7e).contains(&(c.c as u32))
+                            || self.resolve_color(c.fg, ui) != run_fg
+                            || self.resolve_color(c.bg, ui) != default_bg
+                        {
+                            break;
+                        }
+                        run.push(c.c);
+                        col_i += 1;
+                    }
+                    painter.text(
+                        egui::pos2(x, y),
+                        egui::Align2::LEFT_TOP,
+                        &run,
+                        mono_id.clone(),
+                        run_fg,
+                    );
+                    continue;
+                }
+
                 // blank default cell: the (already painted) background is all
                 // there is — skip the glyph
-                if ch == ' '
-                    && !cell.flags.contains(Flags::INVERSE)
-                    && !wide
-                    && bg == default_bg
-                {
+                if cell.c == ' ' && !inverse && !wide && bg == default_bg {
+                    col_i += 1;
                     continue;
                 }
                 // CJK glyphs use the fallback font whose baseline differs from
@@ -618,7 +673,7 @@ impl Terminal {
                 painter.text(
                     egui::pos2(x, q(y_draw)),
                     egui::Align2::LEFT_TOP,
-                    ch.to_string(),
+                    cell.c.to_string(),
                     mono_id.clone(),
                     fg,
                 );
@@ -631,6 +686,7 @@ impl Terminal {
                         egui::Stroke::new(1.0, fg),
                     );
                 }
+                col_i += 1;
             }
         }
 
@@ -1088,7 +1144,16 @@ impl Terminal {
                     cell_h,
                 ),
             );
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::IMERect(ime_rect));
+            // NB: only send when the rect actually changed — every viewport
+            // command makes egui request a repaint, and this fires every
+            // frame while focused; unconditional sending was a paint→cmd→
+            // repaint feedback loop pinning the app at ~128 fps forever.
+            if self.last_ime_rect != Some(ime_rect) {
+                self.last_ime_rect = Some(ime_rect);
+                ui.ctx().send_viewport_cmd(egui::ViewportCommand::IMERect(ime_rect));
+            }
+        } else {
+            self.last_ime_rect = None;
         }
 
         // Keyboard input when focused
@@ -1510,6 +1575,26 @@ mod wheel_report_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn click_on_cjk_spacer_selects_the_wide_char() {
+        let (input_tx, _rx) = mpsc::unbounded_channel();
+        let (mut t, _ti, _be) = Terminal::new(80, 24, 1000, input_tx);
+        t.feed("中文ok".as_bytes());
+        t.cell_w = 10.0;
+        t.cell_h = 20.0;
+        let origin = egui::pos2(0.0, 0.0);
+        // layout: 中(cols 0-1) 文(cols 2-3) o(col 4) k(col 5)
+        let mid = |col: f32| egui::pos2(col * 10.0, 10.0);
+        let p = t.point_from_pos(mid(1.5), origin); // spacer half of 中
+        assert_eq!((p.line, p.col), (0, 0), "spacer click must select the wide char start");
+        let p = t.point_from_pos(mid(2.5), origin); // first half of 文
+        assert_eq!((p.line, p.col), (0, 2));
+        let p = t.point_from_pos(mid(3.5), origin); // spacer half of 文
+        assert_eq!((p.line, p.col), (0, 2), "spacer click must select the wide char start");
+        let p = t.point_from_pos(mid(4.5), origin); // 'o'
+        assert_eq!((p.line, p.col), (0, 4));
+    }
 
     fn dump_grid(t: &Terminal) -> String {
         let grid = t.term.grid();

@@ -269,6 +269,9 @@ pub struct XxsshgApp {
 
     tabs: Vec<Tab>,
     active_tab: usize,
+    /// Last time any tab received PTY output — drives the adaptive repaint
+    /// heartbeat (fast while output flows, slow when idle)
+    last_output: Option<std::time::Instant>,
     selected_server: usize,
 
     form: Option<ServerForm>,
@@ -320,6 +323,7 @@ impl XxsshgApp {
             gcfg,
             tabs: Vec::new(),
             active_tab: 0,
+            last_output: None,
             selected_server: 0,
             form: None,
             form_open: false,
@@ -892,6 +896,7 @@ impl XxsshgApp {
                         }
                     }
                     term.feed(&bytes);
+                    self.last_output = Some(std::time::Instant::now());
                 }
                 while let Some(title) = title_rx.try_recv().ok() {
                     term.title = title;
@@ -1906,12 +1911,20 @@ impl eframe::App for XxsshgApp {
 
         // Poll background session activity every frame; keep repainting while
         // any tab is live so output keeps flowing even without user input.
+        // Heartbeat is adaptive: fast (16ms) while output has been flowing in
+        // the last 300ms so bursts render smoothly, otherwise a slow 100ms
+        // poll that merely watches the channels — idle CPU drops to near zero
+        // and input events still trigger immediate repaints on their own.
         self.poll_tabs();
         let live = self.tabs.iter().any(|t| {
             matches!(t, Tab::Connecting { .. } | Tab::Open { closed: None, .. })
         });
         if live {
-            ctx.request_repaint_after(std::time::Duration::from_millis(16));
+            let recent_output = self
+                .last_output
+                .is_some_and(|t| t.elapsed() < std::time::Duration::from_millis(300));
+            let period = if recent_output { 16 } else { 100 };
+            ctx.request_repaint_after(std::time::Duration::from_millis(period));
         }
 
         // Theme
