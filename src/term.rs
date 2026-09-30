@@ -258,6 +258,9 @@ pub struct Terminal {
     /// Last IME cursor rect sent to the OS (dedup: viewport commands each
     /// request a repaint, so resending the same rect is a repaint loop)
     last_ime_rect: Option<egui::Rect>,
+    /// True between a shift+press and its release when extending the current
+    /// selection instead of starting a new one
+    extending_selection: bool,
     /// last logged render-metrics tuple (ppp, font_size, cell_w, cell_h) bits
     last_metrics: Option<(u32, u32, u32, u32)>,
 }
@@ -308,6 +311,7 @@ impl Terminal {
                 focus_demands: 0,
                 last_focus_demand: None,
                 last_ime_rect: None,
+                extending_selection: false,
                 last_metrics: None,
             },
             title_rx,
@@ -904,7 +908,22 @@ impl Terminal {
         }
         if response.clicked() {
             response.request_focus();
-            self.selection = None;
+            // Shift+click extends the current selection from its original
+            // anchor (mainstream "adjust the far end" behavior). NB: this is
+            // handled HERE, not via drag_started — a plain click never drags,
+            // so drag_started only ever fires for shift+drags.
+            if ui.input(|i| i.modifiers.shift) {
+                match self.selection {
+                    Some(sel) => {
+                        if let Some(pos) = response.interact_pointer_pos() {
+                            self.selection = Some((sel.0, self.point_from_pos(pos, origin)));
+                        }
+                    }
+                    None => self.selection = None,
+                }
+            } else {
+                self.selection = None;
+            }
         }
 
         let mods_now = ui.input(|i| i.modifiers);
@@ -984,8 +1003,17 @@ impl Terminal {
             // Mouse selection (local)
             if response.drag_started() {
                 if let Some(pos) = response.interact_pointer_pos() {
-                    self.drag_anchor = Some(self.point_from_pos(pos, origin));
-                    self.selection = None;
+                    // Shift+press with an active selection EXTENDS it from its
+                    // original anchor (mainstream "adjust the far end"
+                    // behavior — shift+click and shift+drag both); a plain
+                    // press starts a fresh selection.
+                    self.extending_selection = mods_now.shift && self.selection.is_some();
+                    if self.extending_selection {
+                        self.drag_anchor = Some(self.selection.unwrap().0);
+                    } else {
+                        self.selection = None;
+                        self.drag_anchor = Some(self.point_from_pos(pos, origin));
+                    }
                 }
             } else if response.dragged() {
                 if let (Some(anchor), Some(pos)) = (self.drag_anchor, response.interact_pointer_pos()) {
@@ -1011,6 +1039,7 @@ impl Terminal {
                     self.selection = Some((anchor, cur));
                 }
             } else if response.drag_stopped() {
+                self.extending_selection = false;
                 if copy_on_select {
                     if let Some(text) = self.selection_text() {
                         ui.ctx().copy_text(text);
