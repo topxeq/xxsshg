@@ -1170,6 +1170,17 @@ impl XxsshgApp {
                         clear = Some(i);
                         ui.close();
                     }
+                    if matches!(self.tabs[i], Tab::Open { .. })
+                        && ui.button(tpl(tr(self.lang(), "menu_copy_buffer"), &[])).clicked()
+                    {
+                        if let Some(Tab::Open { term, .. }) = self.tabs.get(i) {
+                            let text = term.buffer_text();
+                            if !text.is_empty() {
+                                ui.ctx().copy_text(text);
+                            }
+                        }
+                        ui.close();
+                    }
                     if ui.button(tpl(tr(self.lang(), "btn_close_tab"), &[])).clicked() {
                         close = Some(i);
                         ui.close();

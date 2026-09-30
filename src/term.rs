@@ -346,6 +346,31 @@ impl Terminal {
         self.feed(MODE_RESET);
     }
 
+    /// Whole buffer (scrollback + viewport) as text: one row per line with
+    /// trailing blanks trimmed, trailing blank lines dropped so an idle
+    /// prompt doesn't copy a screenful of empties. Nothing reaches the PTY.
+    pub fn buffer_text(&self) -> String {
+        let grid = self.term.grid();
+        let cols = grid.columns();
+        let mut lines: Vec<String> = Vec::new();
+        for line in grid.topmost_line().0..=grid.bottommost_line().0 {
+            let row = &grid[Line(line)];
+            let mut text = String::new();
+            for col in 0..cols {
+                let cell = &row[Column(col)];
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                text.push(cell.c);
+            }
+            lines.push(text.trim_end_matches(' ').to_string());
+        }
+        while lines.last().is_some_and(|l| l.is_empty()) {
+            lines.pop();
+        }
+        lines.join("\n")
+    }
+
     /// Resize the grid; returns true if the size actually changed
     pub fn resize(&mut self, cols: u16, rows: u16) -> bool {
         if cols == self.cols && rows == self.rows || cols == 0 || rows == 0 {
@@ -1624,6 +1649,31 @@ mod wheel_report_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// buffer_text spans scrollback + viewport and drops trailing blank rows
+    #[test]
+    fn buffer_text_covers_scrollback() {
+        let (input_tx, _rx) = mpsc::unbounded_channel();
+        let (mut t, _ti, _be) = Terminal::new(80, 24, 1000, input_tx);
+        // 30 lines into a 24-row viewport: the first 6 spill into scrollback
+        let mut stream = Vec::new();
+        for i in 0..30 {
+            stream.extend_from_slice(format!("line{i}\r\n").as_bytes());
+        }
+        t.feed(&stream);
+        let text = t.buffer_text();
+        assert!(text.starts_with("line0\n"), "scrollback top missing: {text:?}");
+        assert!(text.ends_with("line29"), "viewport content missing: {text:?}");
+        assert_eq!(text.lines().count(), 30, "trailing blank rows must be dropped");
+    }
+
+    /// a fresh (blank) terminal copies nothing
+    #[test]
+    fn buffer_text_empty_terminal() {
+        let (input_tx, _rx) = mpsc::unbounded_channel();
+        let (t, _ti, _be) = Terminal::new(80, 24, 1000, input_tx);
+        assert_eq!(t.buffer_text(), "");
+    }
 
     #[test]
     fn click_on_cjk_spacer_selects_the_wide_char() {

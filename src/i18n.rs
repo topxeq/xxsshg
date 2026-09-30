@@ -122,6 +122,7 @@ Config: ~/.xxssh (servers.json / settings.json / gui.json)", "轻量级图形 SS
     ("hk_close_tab", "Close tab hotkey", "关闭页签热键", "關閉頁籤熱鍵"),
     ("menu_sftp", "SFTP file manager", "SFTP 文件管理", "SFTP 檔案管理"),
     ("menu_clear", "Clear buffer", "清空缓冲区", "清空緩衝區"),
+    ("menu_copy_buffer", "Copy buffer", "复制缓冲区", "複製緩衝區"),
     // ---- self-update ----
     ("update_title", "Check for updates", "检查更新", "檢查更新"),
     ("update_checking", "Checking for updates...", "正在检查更新...", "正在檢查更新..."),
