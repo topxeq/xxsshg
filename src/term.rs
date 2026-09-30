@@ -549,9 +549,12 @@ impl Terminal {
             );
             if self.last_metrics != Some(key) {
                 self.last_metrics = Some(key);
+                let gal_w = ui.ctx().fonts_mut(|f| {
+                    f.layout_no_wrap("0123456789abcdefghij".to_string(), font_id.clone(), egui::Color32::WHITE).rect.width()
+                });
                 crate::diag::log(&format!(
-                    "render metrics: ppp={ppp} font={:.1}px cell={cell_w:.2}x{cell_h:.2}",
-                    font_size * ppp
+                    "render metrics: ppp={ppp} font={:.1}px cell={cell_w:.2}x{cell_h:.2} galley20={gal_w:.2} expected20={:.2} per-char={:.3} vs cell_w",
+                    font_size * ppp, cell_w * 20.0, gal_w / 20.0
                 ));
             }
         }
@@ -797,6 +800,18 @@ impl Terminal {
                 }
             }
         }
+        // TEMP DIAG: paint the mouse hit-grid column boundaries as lines so
+        // glyph-vs-hit-test offsets become visible on screen.
+        if std::env::var("XXSSHG_DEBUG_GRID").ok().as_deref() == Some("1") {
+            for c in 0..=self.cols as usize {
+                let lx = q(origin.x + c as f32 * cell_w);
+                painter.line_segment(
+                    [egui::pos2(lx, origin.y), egui::pos2(lx, origin.y + self.rows as f32 * cell_h)],
+                    egui::Stroke::new(1.0, egui::Color32::from_rgb(0, 255, 0)),
+                );
+            }
+        }
+
         // Cursor (only on the visible screen when not scrolled into history)
         {
             let cp0 = grid.cursor.point;
@@ -1003,6 +1018,11 @@ impl Terminal {
             // Mouse selection (local)
             if response.drag_started() {
                 if let Some(pos) = response.interact_pointer_pos() {
+                    let p = self.point_from_pos(pos, origin);
+                    diag_log(&format!(
+                        "sel anchor: pos=({:.1},{:.1}) origin=({:.1},{:.1}) cell_w={:.2} -> line={} col={}",
+                        pos.x, pos.y, origin.x, origin.y, self.cell_w, p.line, p.col
+                    ));
                     // Shift+press with an active selection EXTENDS it from its
                     // original anchor (mainstream "adjust the far end"
                     // behavior — shift+click and shift+drag both); a plain
