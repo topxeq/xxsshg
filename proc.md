@@ -22,6 +22,12 @@
 - `term.rs` drag_started 分支：锚点从 `response.interact_pointer_pos()` 改为 `ui.input(|i| i.pointer.press_origin())`（egui 记录的真实按下位置），阈值漂移不再影响选区起点；shift+drag 延伸、复制跟随等行为不变
 - 45 测试全过、clippy 无新警告、release 构建通过；改动未提交，随下次 GUI 发布带走
 
+### 发布（用户实测确认后发版）
+- 提交顺序合规：commit 42f8179 → touch main.rs 重编 → `--version` 核对 `v0.8.8 (42f8179)` 版本+哈希都新；45 测试全过
+- `publish-xxsshg-0.8.8.ps1`（0.8.7 版 sed 生成，**新加的 cleanup-gui-latest.py 步骤首次随模板生效**，自动删除 0.8.7 旧条目）→ vid=ver-17919415103feef6，17.01MB，sha256 1e252acf…d194d
+- 公网验证：Windows GUI isLatest=0.8.8（CLI 四平台 0.5.4 不受影响）；实下 xxsshg.exe sha 与记录一致、运行输出 `xxsshg v0.8.8 (42f8179)`；卡片顺序天然 GUI 在底（创建顺序，新条目最新，无需 keep-gui-bottom）
+- **顺手补账**：repo-gui 的 0.8.6/0.8.7 提交一直没推远端，本次连同 0.8.8（+Cargo.lock 7b9dba2）一起 push 到 github.com/topxeq/xxsshg
+
 ## 2026-10-14 修复会话（CLI 0.5.4）：sync pull 两项 P0/P1（静默 0 传输 + --delete 删光本地）
 
 > 本次改的是 CLI 仓库 repo/（xxssh），非 xxsshg；详见根目录 bug-report-sync-pull.md 的「修复落地」节。
