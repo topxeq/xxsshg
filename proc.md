@@ -6,6 +6,59 @@
 
 ---
 
+## 2026-10-14 简化（GUI）：按用户决策移除 OSC 钩子注入与设置开关
+
+- 用户定调：不加开关（增加复杂度），当前目录取不到就算了，让用户选或输入目录
+- 移除：`gcfg.osc7_cwd` 设置项、设置界面行、远程会话建立时的 OSC 7 注入块、`termup::osc7_enable_bytes` 及其测试、local.rs 的 cmd/PowerShell 钩子（CMD_CWD_HOOK/PS_CWD_HOOK/`spawn` 的 cwd_hook 参数）与 osc99_gui_chain e2e（依赖注入钩子）
+- 保留：OSC 7/9;9 解析与信任判据（用户自装 shell 集成时仍可直传）、全部弹框/复制/上传链路、copy_local、osc99_passthrough spike 测试（自包含，文档化 ConPTY 透传能力）、b64_utf16le（测试用）
+- 行为：拖拽 → cwd 可信则直传/直复制，否则弹目录选择框（远程锚 home、本地锚 USERPROFILE）——选择框成为默认路径
+- 55 测试全过，构建通过
+
+---
+
+## 2026-10-14 功能（GUI）：本地 cmd/PowerShell 拖拽 → 复制到终端当前目录
+
+### 前提验证（spike，先定生死再动工）
+- ConPTY 会把子进程的 OSC 9;9 序列透传到 PTY 输出流（Windows Terminal 官方 shell 集成同款机制），cmd（经 clink 展开 PROMPT）与 PowerShell 均实测通过
+- 新增永久 e2e 测试 `XXSSHG_OSC99_E2E=1 cargo test osc99`：osc99_passthrough（裸 ConPTY 验证两个钩子）+ osc99_gui_chain（走生产 local::spawn + 真实 Terminal 模型，断言 trusted_cwd 初始值与 cd 跟随）
+
+### 实现要点
+- **钩子全部在 spawn 参数里**（与远程"打字注入"不同，不可见且必装）：
+  - cmd：`cmd.exe /K PROMPT $E]9;9;%COMPUTERNAME%;$P$E\$P$G`（$P 每提示符求值，cd 自动跟随）
+  - PowerShell：`-NoExit -EncodedCommand <b64(UTF16LE)>`，钩子为 prompt() 覆盖：先 [Console]::Write(OSC 9;9) 再输出默认样式提示符。**大坑**：`& $orig` 包装 + [Console]::Write 合在一个函数里在 ConPTY 下必挂（二分定位过），保持现形状；自定义提示符（oh-my-posh 等）在开关开启时会被替换（设置悬停说明里写明）
+  - 手写 b64_utf16le（无 base64 依赖）；标准填充规则：余 1 字节 `==`、余 2 字节 `=`（写错过一版导致 PS 秒退，测试已锁定参考值）
+- **term.rs 扫描器扩展**：`ESC]9;9;` 状态分支，payload `HOST;PATH`（第一个 ';' 切分；首段含盘符冒号或 UNC 开头则整体视为路径——分号合法出现在 Windows 目录名）；路径 trim 引号、必须 rooted（X:\ 或 \）；**不做百分号解码**（Windows 原生路径）。信任判据与远程一致（主机段=%COMPUTERNAME% 比对 + 回车制新鲜度）
+- **termup.rs 本地模式**：TermUp::new(lang, local)，local=true 时 state 恒 Ready（无懒加载 SFTP）；upload_local → copy_local（tokio::fs 递归复制，目录合并语义，ConflictPolicy 完整复用含改名/跳过）；DirPick 本地分支（std::fs 列目录，canonicalize 后剥 `\?\` 前缀，锚点 USERPROFILE）；文案按模式分支（复制 vs 上传）
+- **app.rs 本地分支多一道存在性兜底**：trusted 且 `Path::is_dir()` 才直传——这是错机器路径的最后防线（嵌套 ssh/wsl 的上报即使主机名撞车，/home/... 在本地必然 is_dir 失败 → 弹框）
+
+### 测试与教训
+- 57 测试全过（+2：osc99 扫描器 2 例、copy_local 合并/覆盖 1 例、b64 参考 1 例；gui_chain e2e 2 例环境门控）
+- **e2e 教训（两个都有普遍性）**：① ConPTY 启动后会重新开启 win32-input-mode（[?9001h），此后裸 
+ 不再被当作回车——测试必须见 9001h 就补发 9001l（生产 local.rs 只在启动时关一次，PSReadLine 的回车受此影响是既有行为，未动）；② clink 启动发 ESC[6n 并阻塞等待应答，真实 GUI 的终端模型会自动答 CPR，模拟测试必须同样应答
+- **工具教训重犯**：bash heredoc（即使 << 'EOF' 引号定界）在写含 \ 的内容时仍会吃反斜杠，本次两次踩坑（测试字面量、ps_hook 的 ST 反斜杠都被降级）——exp1.md 已有记录，此后含反斜杠的 Rust 内容一律走 Edit 工具或 python 显式 \ 字节
+
+---
+
+## 2026-10-14 功能（GUI）：拖拽文件进终端页签 → 上传到终端当前目录
+
+### 需求（用户定调）
+- 拖文件/文件夹进**终端页签**即上传到该终端的当前目录；目标语义 = **承载目录**（拖 `d:	mpbc` 到 `/mnt1/dest` → 得 `/mnt1/dest/abc`，与 SFTP 页 upload_path 一致）
+- 当前目录**必须确定无误才直传**；否则弹目录选择对话框（定位在用户目录），可输入不存在目录并确认创建
+- 不许用模糊猜测（标题解析、注入查询等一概不进直传路径）
+
+### 设计与实现
+- **可信判据**（term.rs `trusted_cwd`）：shell 亲报 OSC 7 + 主机段与页签 server.host 一致（防嵌套 ssh 传错机器；大小写不敏感；空主机段不信）+ 陈旧判定（回车制）：用户按过回车（执行了命令）后，必须等到下一个提示符的新 OSC 7 才恢复可信——收不到说明集成已死；**普通输出不使上报失效**（precmd 的 OSC 7 先于 PS1 打印，若按输出判陈旧则空闲提示符下永远不可信，自查时发现并推翻了初版"无输出制"判据）。vte 0.15 不解析 OSC 7，`feed()` 里加了独立字节状态机（Esc ] 7 ; → payload → BEL/ST，跨 chunk 安全，%XX 解码，4096 上限防失控）
+- **termup.rs（新模块）**：终端页签懒加载 SFTP（`spawn_sftp` 独立连接，密码/hostkey 问题复用 app 级 Question 对话框，即 poll_tabs 1c/2c）；Ready 后后台 `canonicalize(".")` 存 home；`upload_to` 目标目录+名字拼接，复用 sftp.rs 传输原语与 ConflictPolicy（冲突对话框复刻 transfer_ask_ui）；目录选择器 DirPick（只列子目录、上级/Go/双击导航、OK 时 remote_is_dir 校验、不存在走 mkdir_all 确认创建）；进度浮层/连接徽标/结果 toast 全 painter 绘制（不抢终端事件）
+- **app.rs**：Tab::Open 增加 `up: TermUp` 字段；terminal_area 拖放入队 → Idle 时 `connect()` 懒触发 → Ready+pending → trusted 直传（toast 显示目标）/ 否则 pick_open(home)；本地 shell 页签 toast 提示不支持；close_tab/reconnect_tab 均做 up.shutdown() 防连接泄漏；失败即清 pending 不自动重试（防认证失败循环）
+- **可选增强（默认关）**：`gcfg.osc7_cwd` 设置项——新会话建立 800ms 后向 shell 注入单行 precmd 钩子（zsh `precmd_functions` 末位追加 / bash `PROMPT_COMMAND` 末位追加，报告 `file://<server.host>` 保证主机校验必过；嵌套机器的钩子不会继承，其自带集成若主机不符仍走对话框）。设置对话框有悬停说明
+
+### 验证
+- 51 测试全过（新增 OSC 7 解析 5 例：BEL/ST 两式、%解码/无主机段、新鲜度+主机不符、跨 chunk、非绝对路径/超长丢弃；注入片段格式 1 例）；cargo build 通过
+- 待实机验证：真实服务器拖拽直传/弹框/创建目录/冲突处理/进度浮层
+- 教训：bash heredoc（<<'EOF'）写 Rust 测试字面量会把 `\033` 降级成 ``（Rust 里是 NUL+"33"），断言神不知鬼不觉地错——测试字面量含反斜杠时用 Edit 工具写
+
+---
+
 ## 2026-10-14 修复会话（GUI）：终端划选锚点偏移（egui 拖动阈值）
 
 ### 现象与用户期望

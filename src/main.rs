@@ -17,6 +17,7 @@ mod session;
 mod sftp;
 mod sftpui;
 mod term;
+mod termup;
 mod txdef;
 mod update;
 mod xconfig;

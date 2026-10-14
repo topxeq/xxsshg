@@ -15,7 +15,14 @@ use crate::local::{self, ShellKind};
 use crate::sftpui::SftpTab;
 use crate::session::{self, ConnectError, ConnectOpts, ConnectRequest, SessionEvent, SessionHandle};
 use crate::term::Terminal;
+use crate::termup::{TermUp, UpState};
 use crate::xconfig::{load_settings, save_settings, AppSettings, AuthMethod, Server};
+
+/// Local session hostname as the OSC 9;9 hooks report it (%COMPUTERNAME%);
+/// empty on non-Windows: local-shell hooks are Windows-only anyway
+fn local_hostname() -> String {
+    std::env::var("COMPUTERNAME").unwrap_or_default()
+}
 
 /// Effective connection options: per-server proxy > global proxy (same merge as xxssh)
 fn resolve_opts(server: &Server, settings: &AppSettings) -> ConnectOpts {
@@ -59,6 +66,8 @@ enum Tab {
         bell_flash: bool,
         /// None for local shells (no reconnect possible)
         server: Option<Server>,
+        /// drag&drop upload: lazy SFTP channel + target resolution + transfers
+        up: TermUp,
     },
     Failed {
         name: String,
@@ -480,6 +489,17 @@ impl XxsshgApp {
         );
         log::info!("reconnect_tab: respawning '{}'", server.name);
         crate::diag::log(&format!("reconnect requested: '{}'", server.name));
+        // tear down whatever session / upload channel occupies this slot
+        // (reconnect normally targets a closed tab, but a live one must not
+        // leak its SSH session or lazy SFTP channel)
+        let old = std::mem::replace(
+            &mut self.tabs[idx],
+            Tab::Failed { name: String::new(), error: String::new(), server: None },
+        );
+        if let Tab::Open { handle, mut up, .. } = old {
+            up.shutdown();
+            let _ = handle.close_tx.send(());
+        }
         let (cols, rows) = self.last_grid;
         let (result_rx, request_rx) = session::spawn_connect(&self.rt, server.clone(), opts, cols, rows);
         self.tabs[idx] = Tab::Connecting {
@@ -515,6 +535,7 @@ impl XxsshgApp {
                     closed: None,
                     bell_flash: false,
                     server: None,
+                    up: TermUp::new(self.lang(), true),
                 });
                 self.active_tab = self.tabs.len() - 1;
                 self.prev_active_tab = self.active_tab; // Terminal::new starts focus_pending=true
@@ -544,7 +565,8 @@ impl XxsshgApp {
         let tab = self.tabs.remove(idx);
         crate::diag::log(&format!("tab closed: {}", tab.name()));
         match tab {
-            Tab::Open { handle, .. } => {
+            Tab::Open { handle, mut up, .. } => {
+                up.shutdown();
                 let _ = handle.close_tx.send(());
             }
             Tab::Sftp { st, .. } => {
@@ -795,6 +817,29 @@ impl XxsshgApp {
             }
         }
 
+        // 1c. terminal-tab upload channel: auth questions while connecting
+        for i in 0..self.tabs.len() {
+            if let Tab::Open { up, .. } = &mut self.tabs[i] {
+                if self.question.is_none() {
+                    if let Some(req) = up.poll_request() {
+                        self.question = Some(PendingQuestion {
+                            question: match req {
+                                ConnectRequest::Password { user, host, respond } => {
+                                    Question::Password { user, host, respond: Some(respond), input: String::new() }
+                                }
+                                ConnectRequest::Passphrase { path, respond } => {
+                                    Question::Passphrase { path, respond: Some(respond), input: String::new() }
+                                }
+                                ConnectRequest::HostKey { host, port, fingerprint, changed, respond } => {
+                                    Question::HostKey { host, port, fingerprint, changed, respond: Some(respond) }
+                                }
+                            },
+                        });
+                    }
+                }
+            }
+        }
+
         // 2. Connect results
         let mut connect_results: Vec<(usize, String, Result<SessionHandle, ConnectError>, bool, Server)> =
             Vec::new();
@@ -835,7 +880,8 @@ impl XxsshgApp {
                         resize_sent: false,
                         closed: None,
                         bell_flash: false,
-                        server: Some(server),
+                        server: Some(server.clone()),
+                        up: TermUp::new(lang, false),
                     };
                 }
                 Err(e) => {
@@ -875,6 +921,15 @@ impl XxsshgApp {
                         let msg = e.message(lang);
                         self.tabs[i] = Tab::Failed { name, error: msg, server: Some(server) };
                     }
+                }
+            }
+        }
+
+        // 2c. terminal-tab upload channel: connect results
+        for i in 0..self.tabs.len() {
+            if let Tab::Open { up, .. } = &mut self.tabs[i] {
+                if let Some(res) = up.poll_result() {
+                    up.on_connect_result(&self.rt, res);
                 }
             }
         }
@@ -1224,6 +1279,7 @@ impl XxsshgApp {
         let i = self.active_tab;
         let mut do_reconnect = false;
         let mut do_close = false;
+        let mut up_note: Option<String> = None;
         match &mut self.tabs[i] {
             Tab::Connecting { status, .. } => {
                 ui.centered_and_justified(|ui| {
@@ -1258,7 +1314,7 @@ impl XxsshgApp {
                     ui.spinner();
                 });
             }
-            Tab::Open { term, handle, resize_sent, closed, bell_flash, server, .. } => {
+            Tab::Open { term, handle, resize_sent, closed, bell_flash, server, up, .. } => {
                 if let Some(reason) = closed.clone() {
                     let can_reconnect = server.is_some();
                     ui.centered_and_justified(|ui| {
@@ -1299,6 +1355,88 @@ impl XxsshgApp {
                             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Focus);
                         }
                     }
+
+                    // ---- drag & drop upload ------------------------------------
+                    // OS files dropped on the terminal are copied/uploaded
+                    // into the terminal's current directory when the shell
+                    // reliably reported it (OSC 7 remote / OSC 9;9 local +
+                    // host + freshness); otherwise a directory picker asks.
+                    let dropped: Vec<PathBuf> = ui.input(|i| {
+                        i.raw
+                            .dropped_files
+                            .iter()
+                            .map(|f| f.path().to_path_buf())
+                            .collect()
+                    });
+                    if !dropped.is_empty() {
+                        up.enqueue(dropped);
+                    }
+                    up.update();
+                    if let Some(msg) = up.take_failure() {
+                        up_note = Some(msg);
+                    }
+                    if !up.pending.is_empty() && up.pick.is_none() {
+                        if server.is_some() {
+                            // drops waiting + no channel yet: open it lazily
+                            // (auth questions use the shared question dialog)
+                            if matches!(up.state, UpState::Idle) {
+                                if let Some(srv) = server {
+                                    let opts = resolve_opts(srv, &self.settings);
+                                    up.connect(&self.rt, srv.clone(), opts);
+                                }
+                            }
+                            if up.is_ready() {
+                                let paths = std::mem::take(&mut up.pending);
+                                let host =
+                                    server.as_ref().map(|s| s.host.as_str()).unwrap_or_default();
+                                match term.trusted_cwd(host) {
+                                    Some(dir) => {
+                                        let msg =
+                                            tpl(tr(up.lang, "up_direct"), &[("dir", &dir)]);
+                                        up.note(msg);
+                                        up.upload_to(&self.rt, &dir, paths);
+                                    }
+                                    None => {
+                                        let anchor = up.home.clone();
+                                        up.pick_open(&self.rt, paths, anchor);
+                                    }
+                                }
+                            }
+                        } else {
+                            // local tab: copy when the shell's cwd is CERTAIN
+                            // (OSC 9;9 hook + COMPUTERNAME match + the dir
+                            // really exists); otherwise ask, anchored at the
+                            // user profile. The existence check is also the
+                            // last guard against a wrong-machine path (e.g. a
+                            // nested ssh/wsl whose report slipped through).
+                            let paths = std::mem::take(&mut up.pending);
+                            let host = local_hostname();
+                            match term.trusted_cwd(&host) {
+                                Some(dir) if std::path::Path::new(&dir).is_dir() => {
+                                    let msg =
+                                        tpl(tr(up.lang, "up_copy_dir"), &[("dir", &dir)]);
+                                    up.note(msg);
+                                    up.upload_to(&self.rt, &dir, paths);
+                                }
+                                _ => {
+                                    let anchor = dirs::home_dir();
+                                    up.pick_open_local(&self.rt, paths, anchor);
+                                }
+                            }
+                        }
+                    }
+                    if let Some((dir, paths)) = up.poll_pick() {
+                        up.upload_to(&self.rt, &dir, paths);
+                    }
+                    let hover = ui.input(|i| !i.raw.hovered_files.is_empty());
+                    let area = ui.max_rect();
+                    crate::termup::overlay_ui(up, ui, area, hover);
+                    if up.transfer_ask.is_some() {
+                        let mut ask = up.transfer_ask.take();
+                        crate::termup::conflict_ask_ui(ui, up.lang, &mut ask);
+                        up.transfer_ask = ask;
+                    }
+                    up.pick_ui(ui, &self.rt);
                 }
             }
         }
@@ -1306,6 +1444,9 @@ impl XxsshgApp {
             self.close_tab(i);
         } else if do_reconnect {
             self.reconnect_tab(i);
+        }
+        if let Some(note) = up_note {
+            self.toast(note);
         }
     }
 

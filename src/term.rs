@@ -202,6 +202,62 @@ struct SelPoint {
 const MODE_RESET: &[u8] = b"\x1b[?1049l\x1b[?1047l\x1b[?47l\x1b[?1l\x1b[?25h\
 \x1b[?1000l\x1b[?1002l\x1b[?1003l\x1b[?1005l\x1b[?1006l\x1b[?1015l\x1b[?2004l";
 
+// ---------------------------------------------------------------------------
+// OSC 7 (shell-reported working directory) scanner
+// ---------------------------------------------------------------------------
+
+/// Scanner states for finding cwd-reporting OSC sequences in the PTY byte
+/// stream: `ESC ] 7 ; <payload> (BEL | ESC \)` (shell integration, remote)
+/// and `ESC ] 9 ; 9 ; <payload> (BEL | ESC \)` (ConEmu/Windows-Terminal
+/// convention, local cmd/PowerShell). Runs alongside the vte parser (which
+/// ignores both) so both see every byte; tolerant of chunk splits.
+#[derive(Clone, Copy, PartialEq)]
+enum Osc7St {
+    Normal,
+    Esc,
+    EscBkt,
+    EscBkt7,
+    EscBkt9,
+    EscBkt9S,
+    EscBkt9S9,
+    Payload,
+    PayloadEsc,
+}
+
+/// Which sequence the current payload belongs to (dispatch differs)
+#[derive(Clone, Copy, PartialEq)]
+enum OscKind {
+    Osc7,
+    Osc99,
+}
+
+/// Payload cap: a legitimate `file://host/path` is far below this; a longer
+/// run means we missed the terminator and must not buffer unbounded.
+const OSC7_MAX: usize = 4096;
+
+/// Decode %XX escapes (OSC 7 paths URL-encode spaces and non-ASCII).
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%'
+            && i + 2 < b.len()
+            && b[i + 1].is_ascii_hexdigit()
+            && b[i + 2].is_ascii_hexdigit()
+        {
+            let hi = (b[i + 1] as char).to_digit(16).unwrap() as u16;
+            let lo = (b[i + 2] as char).to_digit(16).unwrap() as u16;
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
 pub struct Terminal {
     pub term: Term<EventProxy>,
     parser: Processor,
@@ -263,6 +319,19 @@ pub struct Terminal {
     extending_selection: bool,
     /// last logged render-metrics tuple (ppp, font_size, cell_w, cell_h) bits
     last_metrics: Option<(u32, u32, u32, u32)>,
+    /// Working directory reported by the shell via OSC 7 (percent-decoded
+    /// absolute path). Only trusted when `trusted_cwd` passes host+staleness.
+    pub cwd: Option<String>,
+    /// Host segment of the last OSC 7 payload ("" when none was carried)
+    pub cwd_host: String,
+    /// The user executed a command (Enter) after the last OSC 7 report: the
+    /// shell must print a new prompt with a fresh report before the old one
+    /// can be trusted again. Plain OUTPUT never invalidates a report — the
+    /// prompt itself prints after the precmd's OSC 7.
+    cwd_stale: bool,
+    osc7_state: Osc7St,
+    osc7_kind: OscKind,
+    osc7_buf: Vec<u8>,
 }
 
 impl Terminal {
@@ -313,6 +382,12 @@ impl Terminal {
                 last_ime_rect: None,
                 extending_selection: false,
                 last_metrics: None,
+                cwd: None,
+                cwd_host: String::new(),
+                cwd_stale: true,
+                osc7_state: Osc7St::Normal,
+                osc7_kind: OscKind::Osc7,
+                osc7_buf: Vec::new(),
             },
             title_rx,
             bell_rx,
@@ -327,9 +402,156 @@ impl Terminal {
             bytes.len(),
             head
         ));
+        for &b in bytes {
+            self.osc7_step(b);
+        }
         self.parser.advance(&mut self.term, bytes);
         let cp = self.term.grid().cursor.point;
         diag_log(&format!("feed-done: cursor=({},{})", cp.line.0, cp.column.0));
+    }
+
+    /// One byte through the OSC 7 state machine. Tolerant of sequences split
+    /// across feed() chunks. Staleness is NOT output-driven (see `write`).
+    fn osc7_step(&mut self, b: u8) {
+        use Osc7St::*;
+        match self.osc7_state {
+            Payload => {
+                if b == 0x07 {
+                    self.osc7_dispatch();
+                    self.osc7_state = Normal;
+                } else if b == 0x1b {
+                    self.osc7_state = PayloadEsc;
+                } else if self.osc7_buf.len() < OSC7_MAX {
+                    self.osc7_buf.push(b);
+                } else {
+                    // runaway payload: not an OSC 7 we can use
+                    self.osc7_buf.clear();
+                    self.osc7_state = Normal;
+                }
+            }
+            PayloadEsc => {
+                if b == b'\\' {
+                    self.osc7_dispatch();
+                    self.osc7_state = Normal;
+                } else {
+                    self.osc7_buf.clear();
+                    self.osc7_state = Normal;
+                }
+            }
+            _ => {
+                self.osc7_state = match self.osc7_state {
+                    Normal if b == 0x1b => Esc,
+                    Esc => match b {
+                        0x1b => Esc,
+                        b']' => EscBkt,
+                        _ => Normal,
+                    },
+                    EscBkt => match b {
+                        0x1b => Esc,
+                        b'7' => EscBkt7,
+                        b'9' => EscBkt9,
+                        _ => Normal,
+                    },
+                    EscBkt7 => match b {
+                        0x1b => Esc,
+                        b';' => {
+                            self.osc7_kind = OscKind::Osc7;
+                            self.osc7_buf.clear();
+                            Payload
+                        }
+                        _ => Normal,
+                    },
+                    EscBkt9 => match b {
+                        0x1b => Esc,
+                        b';' => EscBkt9S,
+                        _ => Normal,
+                    },
+                    EscBkt9S => match b {
+                        0x1b => Esc,
+                        b'9' => EscBkt9S9,
+                        _ => Normal,
+                    },
+                    EscBkt9S9 => match b {
+                        0x1b => Esc,
+                        b';' => {
+                            self.osc7_kind = OscKind::Osc99;
+                            self.osc7_buf.clear();
+                            Payload
+                        }
+                        _ => Normal,
+                    },
+                    _ => Normal,
+                };
+            }
+        }
+    }
+
+    /// Complete OSC payload received. The vte parser has no handler for
+    /// either cwd sequence, so this is the only consumer.
+    fn osc7_dispatch(&mut self) {
+        let s = String::from_utf8_lossy(&self.osc7_buf).into_owned();
+        self.osc7_buf.clear();
+        let (host, path) = match self.osc7_kind {
+            // OSC 7: `file://host/path` (host optional)
+            OscKind::Osc7 => match s.strip_prefix("file://") {
+                Some(rest) => match rest.find('/') {
+                    Some(i) => (rest[..i].to_string(), rest[i..].to_string()),
+                    None => return,
+                },
+                None => (String::new(), s),
+            },
+            // OSC 9;9 (ConEmu/Windows-Terminal style): `HOST;PATH` (ours) or
+            // plain `PATH` (Windows Terminal's own integration). Raw Windows
+            // paths — no percent-decoding; some integrations quote the path.
+            OscKind::Osc99 => match s.find(';') {
+                // a drive letter / UNC prefix means the whole payload is the
+                // path (semicolons are legal in Windows dir names)
+                Some(i)
+                    if !s[..i].contains(':') && !s[..i].starts_with('\\') =>
+                {
+                    (s[..i].to_string(), s[i + 1..].to_string())
+                }
+                _ => (String::new(), s),
+            },
+        };
+        let path = match self.osc7_kind {
+            OscKind::Osc99 => path.trim_matches('"').to_string(),
+            OscKind::Osc7 => percent_decode(&path),
+        };
+        let rooted = match self.osc7_kind {
+            // OSC 7 paths are POSIX-style absolute
+            OscKind::Osc7 => path.starts_with('/'),
+            // OSC 9;9 paths must be rooted Windows paths (X:\ or \\srv\share)
+            OscKind::Osc99 => {
+                let b = path.as_bytes();
+                (b.len() >= 3 && b[1] == b':' && (b[2] == b'\\' || b[2] == b'/'))
+                    || path.starts_with("\\\\")
+            }
+        };
+        if rooted {
+            self.cwd = Some(path);
+            self.cwd_host = host;
+            self.cwd_stale = false;
+        }
+    }
+
+    /// The terminal's current directory, but ONLY when it is certain: the
+    /// shell itself must have reported it (OSC 7 remote / OSC 9;9 local), the
+    /// report must carry this session's own hostname (rules out a nested
+    /// `ssh` to another machine or a foreign integration whose reports also
+    /// land in the stream), and no command may have been executed since (an
+    /// Enter demands a fresh report from the next prompt — if none arrives,
+    /// the integration is dead and the value may be stale). Anything else
+    /// returns None — the caller falls back to asking the user.
+    pub fn trusted_cwd(&self, server_host: &str) -> Option<String> {
+        if self.cwd_stale || self.cwd_host.is_empty() {
+            return None;
+        }
+        if self.cwd_host.eq_ignore_ascii_case(server_host) {
+            self.cwd.clone()
+        } else {
+            None
+        }
     }
 
     /// Clear screen + scrollback, display-side only (nothing reaches the PTY,
@@ -385,6 +607,14 @@ impl Terminal {
 
     /// Send user input bytes to the PTY
     pub fn write(&mut self, bytes: &[u8]) {
+        // Enter executes whatever is on the line: the shell's cwd may change,
+        // so the last OSC 7 report is only current again once the NEXT prompt
+        // re-reports it (integration alive) — until then it's untrusted.
+        // Covers keys, IME commits and paste (paste routes through here too;
+        // newline-stripped paste executes nothing and stays trusted).
+        if bytes.iter().any(|&b| b == b'\r' || b == b'\n') {
+            self.cwd_stale = true;
+        }
         let _ = self.input_tx.send(bytes.to_vec());
     }
 
@@ -1832,5 +2062,136 @@ mod cursor_tests {
         let p3 = t.term.grid().cursor.point;
         assert_eq!((p3.line.0, p3.column.0), (0, 8), "cursor must keep its cell after grow");
         let _ = dump(&t);
+    }
+}
+
+#[cfg(test)]
+mod osc7_tests {
+    use super::*;
+
+    fn term() -> Terminal {
+        let (input_tx, _rx) = mpsc::unbounded_channel();
+        Terminal::new(80, 24, 1000, input_tx).0
+    }
+
+    #[test]
+    fn osc7_bel_and_st_forms() {
+        let mut t = term();
+        t.feed(b"root@web01:/var/www# \x1b]7;file://web01/var/www\x07");
+        assert_eq!(t.cwd.as_deref(), Some("/var/www"));
+        assert_eq!(t.cwd_host, "web01");
+        assert!(!t.cwd_stale);
+        assert_eq!(t.trusted_cwd("web01").as_deref(), Some("/var/www"));
+        // ST-terminated form
+        t.feed(b"\x1b]7;file://web01/tmp\x1b\\");
+        assert_eq!(t.trusted_cwd("web01").as_deref(), Some("/tmp"));
+    }
+
+    #[test]
+    fn osc7_percent_decoding_and_no_host() {
+        let mut t = term();
+        t.feed(b"\x1b]7;file://web01/home/u%20ser%E4%B8%AD\x07");
+        assert_eq!(t.cwd.as_deref(), Some("/home/u ser中"));
+        assert_eq!(t.trusted_cwd("web01").as_deref(), Some("/home/u ser中"));
+        // bare-path form (no host segment) is recorded but never trusted:
+        // it cannot rule out a nested ssh to another machine
+        t.feed(b"\x1b]7;/opt/data\x07");
+        assert_eq!(t.cwd.as_deref(), Some("/opt/data"));
+        assert_eq!(t.cwd_host, "");
+        assert_eq!(t.trusted_cwd("web01"), None);
+    }
+
+    #[test]
+    fn osc7_freshness_and_host_mismatch() {
+        let mut t = term();
+        // real bash/zsh order: precmd's OSC 7 first, prompt text AFTER it —
+        // the trailing prompt output must NOT invalidate the report
+        t.feed(b"\x1b]7;file://web01/var/www\x07");
+        assert!(t.trusted_cwd("web01").is_some());
+        t.feed(b"root@web01:/var/www# ");
+        assert!(t.trusted_cwd("web01").is_some(), "prompt output after OSC 7 is harmless");
+        // executing a command (Enter) invalidates until the next report
+        t.write(b"cd /tmp\r");
+        assert_eq!(t.trusted_cwd("web01"), None, "stale after Enter");
+        // ...and even a full prompt WITHOUT a new report stays untrusted
+        // (integration died — exactly the case the check exists for)
+        t.feed(b"root@web01:/var/www# ");
+        assert_eq!(t.trusted_cwd("web01"), None, "no re-report after Enter");
+        // new prompt's report makes it current again
+        t.feed(b"\x1b]7;file://web01/tmp\x07");
+        assert!(t.trusted_cwd("web01").is_some(), "fresh again after re-report");
+        // newline-stripped paste executes nothing and stays trusted
+        t.paste("echo hi", &TermMode::empty());
+        assert!(t.trusted_cwd("web01").is_some(), "paste without Enter is harmless");
+        // nested ssh: report from another host must never be trusted
+        t.feed(b"\x1b]7;file://boxB/root\x07");
+        assert_eq!(t.trusted_cwd("web01"), None, "host mismatch is never trusted");
+        assert_eq!(t.trusted_cwd("boxb").as_deref(), Some("/root"), "host match is case-insensitive");
+    }
+
+    #[test]
+    fn osc7_split_across_chunks() {
+        let mut t = term();
+        for part in [
+            &b"prompt \x1b"[..],
+            b"]7;fi",
+            b"le://web01/var/www",
+            &b"\x07"[..],
+        ] {
+            t.feed(part);
+        }
+        assert_eq!(t.trusted_cwd("web01").as_deref(), Some("/var/www"));
+    }
+
+    #[test]
+    fn osc99_host_path_and_trust() {
+        let mut t = term();
+        // exactly what the injected PowerShell/cmd hooks emit (ST form)
+        t.feed(b"\x1b]9;9;DESKTOP-ABC;C:\\Users\\Admin\x1b\\");
+        assert_eq!(t.cwd.as_deref(), Some("C:\\Users\\Admin"));
+        assert_eq!(t.cwd_host, "DESKTOP-ABC");
+        assert_eq!(t.trusted_cwd("desktop-abc").as_deref(), Some("C:\\Users\\Admin"));
+        // BEL form, split across chunks (state machine shares the 7-path)
+        t.feed(b"\x1b]9");
+        t.feed(b";9;DESKTOP-ABC;C:\\Windows\x07");
+        assert_eq!(t.trusted_cwd("DESKTOP-ABC").as_deref(), Some("C:\\Windows"));
+    }
+
+    #[test]
+    fn osc99_variants_and_rejects() {
+        let mut t = term();
+        // no host (plain Windows-Terminal style): recorded but never trusted
+        t.feed(b"\x1b]9;9;C:\\data\x07");
+        assert_eq!(t.cwd.as_deref(), Some("C:\\data"));
+        assert_eq!(t.cwd_host, "");
+        // quoted path; semicolons inside the path survive the host split
+        t.feed(b"\x1b]9;9;BOX;\"C:\\a;b\\c\"\x1b\\");
+        assert_eq!(t.cwd.as_deref(), Some("C:\\a;b\\c"));
+        assert_eq!(t.cwd_host, "BOX");
+        // relative path rejected -> previous values stand
+        t.feed(b"\x1b]9;9;BOX;relative\\path\x07");
+        assert_eq!(t.cwd.as_deref(), Some("C:\\a;b\\c"));
+        assert_eq!(t.cwd_host, "BOX");
+        // single OSC 9 (notification, iTerm2 style) is not 9;9
+        t.feed(b"\x1b]9;hello world\x07");
+        assert_eq!(t.cwd.as_deref(), Some("C:\\a;b\\c"));
+        assert_eq!(t.cwd_host, "BOX");
+        // drive-letter payload without host must NOT be split at the ';'
+        // (a successful dispatch with no host clears the host field)
+        t.feed(b"\x1b]9;9;C:\\x;y\x07");
+        assert_eq!(t.cwd.as_deref(), Some("C:\\x;y"));
+        assert_eq!(t.cwd_host, "");
+    }
+
+    #[test]
+    fn osc7_rejects_non_absolute_and_runaway() {
+        let mut t = term();
+        t.feed(b"\x1b]7;file://web01relative\x07"); // no path after host
+        assert!(t.cwd.is_none());
+        let long = vec![b'a'; OSC7_MAX as usize + 64];
+        t.feed(b"\x1b]7;");
+        t.feed(&long);
+        t.feed(b"\x07");
+        assert!(t.cwd.is_none(), "runaway payload must be dropped");
     }
 }
