@@ -6,6 +6,16 @@
 
 ---
 
+## 2026-10-14 发布（GUI）：v0.8.9 拖拽上传/复制到终端当前目录
+
+- 提交顺序合规：a017833（功能+文档，先提交）→ touch main.rs 重编 → `--version` 核对 `v0.8.9 (a017833)`；55 测试全过；3622b46 补 Cargo.lock
+- `publish-xxsshg-0.8.9.ps1`（0.8.8 版 sed 生成）→ vid=ver-17919631019eb9a7，17.47MB，sha256 11264080…7cdd；cleanup 脚本删除 0.8.8 旧条目，Windows GUI 仅剩 0.8.9 isLatest
+- 公网验证：/api/products 显示 Windows GUI v0.8.9 isLatest=true（CLI 四平台 0.5.4 不受影响）；实下 xxsshg.exe sha 与记录一致、运行输出 `xxsshg v0.8.9 (a017833)`
+- 已推送 github.com/topxeq/xxsshg（371863d..3622b46）
+- 遗留观察项：生产 local.rs 只在启动时关一次 win32-input-mode，ConPTY 会重新开启（影响 PSReadLine 回车识别）——既有行为，如需修另开一项
+
+---
+
 ## 2026-10-14 简化（GUI）：按用户决策移除 OSC 钩子注入与设置开关
 
 - 用户定调：不加开关（增加复杂度），当前目录取不到就算了，让用户选或输入目录
