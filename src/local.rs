@@ -261,6 +261,48 @@ mod tests {
         let _ = handle.close_tx.send(());
         assert!(got, "never saw the echo marker; got: {}", String::from_utf8_lossy(&all));
     }
+
+    /// Enter EXECUTES in a PowerShell tab with the GUI's exact production
+    /// path: real terminal model (answers CPR itself via EventProxy) and no
+    /// win32-input-mode handling at all. Regression guard for local-shell
+    /// keyboard input — if this ever fails, plain-byte input is being
+    /// swallowed somewhere. Gated: XXSSHG_LOCAL_E2E=1
+    #[test]
+    fn conpty_enter_production_shape() {
+        if std::env::var("XXSSHG_LOCAL_E2E").ok().as_deref() != Some("1") {
+            return;
+        }
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let mut handle =
+            spawn(&rt.handle().clone(), ShellKind::PowerShell, 100, 24).expect("spawn powershell");
+        let input_tx = handle.input_tx.clone();
+        let (mut term, _title, _bell) = crate::term::Terminal::new(100, 24, 1000, input_tx.clone());
+        let mut sent_exit = false;
+        let mut closed = false;
+        let start = std::time::Instant::now();
+        let deadline = start + std::time::Duration::from_secs(45);
+        while std::time::Instant::now() < deadline && !closed {
+            while let Some(bytes) = handle.output_rx.try_recv().ok() {
+                // production path: the model answers CPR via EventProxy
+                term.feed(&bytes);
+            }
+            if !sent_exit && start.elapsed() >= std::time::Duration::from_secs(10) {
+                let _ = input_tx.send(b"exit\r".to_vec());
+                sent_exit = true;
+            }
+            if sent_exit {
+                if let Some(SessionEvent::Closed { .. }) = handle.event_rx.try_recv().ok() {
+                    closed = true;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(closed, "exit\\r never executed: PowerShell Enter is broken in the production path");
+    }
 }
 
 /// E2E spike (run with `XXSSHG_OSC99_E2E=1 cargo test osc99 -- --nocapture`):

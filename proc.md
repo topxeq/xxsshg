@@ -6,6 +6,15 @@
 
 ---
 
+## 2026-10-14 勘误（GUI）："PSReadLine 回车失效"是假警报，未修、无需发版
+
+- 0.8.9 发布记录里的"遗留观察项"（ConPTY 重新开启 win32-input-mode 导致 PowerShell 回车失效）经对照实验**证伪**：生产代码路径（Terminal 模型经 EventProxy 自动应答 CPR）下，PowerShell 的裸回车直接可用——探针测试 `exit` 后会话 10.2 秒内正常关闭
+- 假警报根因：spike 阶段一次实验同时改了两个变量（CPR 应答时序 + 9001h 处理），把"及时应答 CPR"的功劳记在了"补发 9001l"上；后续阴性验证（禁用 fix 仍通过）暴露了矛盾
+- 处置：撤销了临时的 `conpty_input_fix` 辅助函数与 app.rs 输出泵接入（未出过提交）；探针转为常驻断言测试 `conpty_enter_production_shape`（XXSSHG_LOCAL_E2E=1，守护"本地 PowerShell 回车可用"）
+- 教训：一次只改一个变量；"修复"在阴性验证通过之前不算成立。0.8.9 无此问题，不需要 0.8.10
+
+---
+
 ## 2026-10-14 发布（GUI）：v0.8.9 拖拽上传/复制到终端当前目录
 
 - 提交顺序合规：a017833（功能+文档，先提交）→ touch main.rs 重编 → `--version` 核对 `v0.8.9 (a017833)`；55 测试全过；3622b46 补 Cargo.lock
