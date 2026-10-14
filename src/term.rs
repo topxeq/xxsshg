@@ -1042,7 +1042,14 @@ impl Terminal {
             self.last_motion_cell = None;
             // Mouse selection (local)
             if response.drag_started() {
-                if let Some(pos) = response.interact_pointer_pos() {
+                // Anchor at the true PRESS point. egui only recognizes a drag
+                // once the pointer moves past max_click_dist (6pt ≈ 2/3 of a
+                // cell), so the drag_started pointer position can already sit
+                // in the NEXT character — anchoring there made the selection
+                // start one char right of the pressed char (or one char left
+                // when dragging leftward). press_origin is where the button
+                // actually went down.
+                if let Some(pos) = ui.input(|i| i.pointer.press_origin()) {
                     let p = self.point_from_pos(pos, origin);
                     diag_log(&format!(
                         "sel anchor: pos=({:.1},{:.1}) origin=({:.1},{:.1}) cell_w={:.2} -> line={} col={}",

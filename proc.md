@@ -6,6 +6,74 @@
 
 ---
 
+## 2026-10-14 修复会话（GUI）：终端划选锚点偏移（egui 拖动阈值）
+
+### 现象与用户期望
+- 期望：划选起点只要落在某字符**格内**（不分左右中）就从该字符开始；终点落在某字符格内就到该字符为止
+- 实际：起点常偏到隔壁字符（向右拖偏右、向左拖偏左）
+
+### 排查链
+- `point_from_pos` 自 0.1.0 起就是 `floor()`（格内即命中），`selection_text`/高亮对终点都是**闭区间**——映射语义本身正确；0.8.6 已验证过数学映射
+- 字形漂移假设排除：用户机日志 `render metrics` 显示 per-char=9.164 vs cell_w=9.167（ppp=1.2），整行漂移 <0.3px，不可感知
+- **真因在 egui 输入层**：`max_click_dist=6.0`——按下后指针移动超 6pt 才触发 `drag_started`；而锚点取的是**触发时刻**的 `interact_pointer_pos()`。格宽仅 9.17px，6pt≈2/3 格：按在字符 N 内拖动，drag_started 时指针常已进 N±1，锚点随之偏一格（方向随拖动方向）
+- 终点无此问题：拖动中 `dragged()` 逐帧更新，release 帧也计入（`is_decidedly_dragging` 含 `any_released()`）
+
+### 修复
+- `term.rs` drag_started 分支：锚点从 `response.interact_pointer_pos()` 改为 `ui.input(|i| i.pointer.press_origin())`（egui 记录的真实按下位置），阈值漂移不再影响选区起点；shift+drag 延伸、复制跟随等行为不变
+- 45 测试全过、clippy 无新警告、release 构建通过；改动未提交，随下次 GUI 发布带走
+
+## 2026-10-14 修复会话（CLI 0.5.4）：sync pull 两项 P0/P1（静默 0 传输 + --delete 删光本地）
+
+> 本次改的是 CLI 仓库 repo/（xxssh），非 xxsshg；详见根目录 bug-report-sync-pull.md 的「修复落地」节。
+
+### 背景（勘误）
+- 前日结论「0.5.2 `sync -d pull` 引擎有 bug」**不成立**：pull 引擎正常，真因是参数顺序陷阱（put/get 的「源在前」肌肉记忆写反了 `sync <local> <remote>`）+ 「根不存在=静默空树」把错误吞成 0 传输 exit 0；`pull --delete` 下升级为静默删光本地的 P0
+
+### 修复（repo/src：sync.rs / main.rs / i18n.rs / help.rs）
+- **方向感知源根校验**：pull 要求远端根存在、push 要求本地根存在（rsync「源必须存在」）；目标端不存在仍算首次同步。缺失报 `sync_remote_root_missing`/`sync_local_root_missing`（三语）
+- **写反启发式**：local 位为 `/` 开头绝对路径 + 本地不存在 + 远端位服务器上也不存在 → `sync_swapped_args`，明示「顺序固定 <local> <remote> 与方向无关」
+- **空源 --delete 熔断**：源树（include/exclude 过滤后）0 文件且有计划删除 → 真跑拒绝 exit 1，提示加新旗标 `--force`；dry-run 仍显示计划。纯函数 `delete_fuse_trips` 可单测
+- **诊断面**：每次 sync 输出根部统计头（两端 files/dirs 数，0 即根写错/不存在）；任一端空树打警告；`--json` 加 `warnings` 数组；`--delete` 前打「计划删除 N 个路径」高亮行；dry-run 汇总加 `（预演）` 后缀
+- **非阻塞**：`ls` 人读输出首行回显 `==> path (N entries)`（打错路径回空列表不再无提示）；`--help sync` 加 ARGUMENT ORDER/MISSING ROOTS 段
+
+### 发布（同会话完成）
+- commit 8459a36 → push main + tag v0.5.4 → CI 全绿（windows/linux/macos/linux-arm64 四 job），GitHub Release v0.5.4 带全平台产物
+- 仙缘渡四平台上架（publish-0.5.4{,-linux,-arm64,-mac}.ps1 由 0.5.3 版 sed 生成）：Windows 8.56MB sha c2dff8b8…（vid=ver-45020948948）；Linux x64 8.04MB sha 411c9647…（vid=ver-10902481888）；Linux ARM64 7.01MB sha eae67452…（vid=ver-26356251078）；macOS universal 18.31MB sha b11fdca2…（vid=ver-50984415910）
+- Linux 两条本机 zigbuild+musl 静态交叉编译；mac universal 从 GH Release 下载覆盖 xxssh-mac-universal/ 后上架（CI macos job 自带 lipo+--version 验证）；各平台 cleanup-tui-platform.py 自动删除旧 0.5.3 条目
+- 公网验证：/api/products 四平台 isLatest 均=0.5.4（Windows GUI 系列不受影响，仍 0.8.7）；downloads/xxssh/xxssh.exe 实下 sha256 与记录一致、运行输出 `xxssh 0.5.4`
+- CLI 仓库无 build.rs（无 git 哈希嵌入），二进制内容与提交顺序无关；Windows 包即提交前构建的 target/release 产物
+
+### 卡片治理（用户看到 9 行 Windows GUI 后要求处理）
+- **根因**：CLI 发布脚本末尾有 `cleanup-tui-platform.py`（按平台删旧版本，只留最新），而 `publish-xxsshg-*.ps1` 从不清理——0.7.2 之后每个 GUI 版本 addVersion+isLatest=true 全部留存，卡片把 isLatest=true 的行全列出来就是 9 行 GUI
+- **清理**：`python cleanup-gui-latest.py 0.8.7`（仓库现成工具，只动 Windows GUI 条目）删 8 条旧版本；副产品：≤0.5.2 老 TUI `--update` 的 GUI 污染路径同步堵死（匹配"含 windows"现在只能命中 Windows 0.5.4 本尊）
+- **根治**：`publish-xxsshg-0.8.7.ps1` 在验证块前插入 `cleanup-gui-latest.py $VERSION` 调用（该脚本是下次 GUI 发布的复制模板，之后每次 GUI 发布自动清理）；PS 语法校验 738 tokens 0 errors
+- **元数据**：xxssh.conf.json 更新并重推——homepageBadge v0.5.1→v0.5.4、描述顶部加「0.5.4 新增：sync 目录同步安全加固」段、GUI 版本提及 0.2.0→0.8.7；推送用 push-meta-0.5.4.ps1（登录+PUT 产品 body，与 publish 脚本第 3 步同构）
+- **终态验证**：卡片版本列表恰 5 行（GUI 0.8.7 + CLI 四平台 0.5.4，全部 isLatest）、badge v0.5.4、描述头 0.5.4 段落
+- **GUI 行沉底**（用户要求 GUI 排在全部 CLI 之下）：发现卡片排序 = **版本条目创建顺序**（最老在最前——GUI 0.8.7 是 09-30 的老条目所以居首）；storefront 服务端源码不在本机，无法改排序。做法：`keep-gui-bottom.py` 删掉 GUI 条目→从线上下载字节一致的原包（sha 校验 b29e7fe4…）→重建条目（新 vid=ver-55225535447）→重传→验证顺序 Windows/Linux x64/ARM64/macOS/GUI ✓，公网下载 sha 不变
+- **排序保持规则**：卡片按创建顺序排，所以 **GUI 发布天然落底；CLI 发布会把新 CLI 行插到 GUI 之后（GUI 顶上去）**——每次 CLI 发布后跑一次 `python keep-gui-bottom.py [版本]`（自下载线上 GUI 包重建条目）；脚本已存 D:\aiprjs\xxssh\keep-gui-bottom.py。**同日用户取消该维护**：顺序不再管理，发布后行序随创建顺序自然排列；脚本仅留备用
+
+### 验证
+- `cargo test` 188 全过（基线 185 + 新增 3 个单测）、clippy 无新警告、release 构建通过
+- aigc01 真机 7 项回归：P0 复现命令改报错、写反被识破、正确 pull 4 文件 3.1MB、增量重跑全 skip、空远端 --delete 被拒、--force 放行、ls 回显；测试残留（远端 /tmp/xxt_empty_fuse、本地临时目录）已清理
+
+## 2026-09-30 发布会话（v0.8.7）：页签右键「复制缓冲区」+ 老 TUI 自更新污染排查
+
+### 功能（0.8.6 → 0.8.7）
+- **页签右键菜单「复制缓冲区」**：`term.rs` 新增 `buffer_text()`——从网格最顶（含回滚区）遍历到底，逐行提取文本；规则与 `selection_text()` 一致（跳过宽字符 spacer、裁行尾空格），额外丢弃缓冲区尾部空行（空闲提示符下不会复制出一屏空行）；纯读显示端网格，不进 PTY
+- 菜单项在 `tabs_bar` 右键菜单「清空缓冲区」旁，仅 `Tab::Open` 显示；i18n 四语（menu_copy_buffer）
+- 新增 2 个单测：30 行灌入 24 行视口（前 6 行进回滚区）断言复制内容首尾与行数；空终端返回空串。测试 43→45 全过
+- 同会话答疑：回滚默认 10000 行（gconfig `default_scrollback`），设置滑块 100–100000 对数刻度；创建终端时定容量，改后只对新页签生效
+
+### 发布
+- v0.8.7 发布到仙缘渡 xxssh 卡 Windows GUI（publish-xxsshg-0.8.7.ps1）；17.01 MB，sha256 b29e7fe4…26eafb，vid=ver-43877949432，公开 API 确认 isLatest=true
+- **流程补充：先提交再构建**——build.rs 把 git 短哈希嵌进二进制，未提交就构建会带旧哈希（本次首次构建即带 78ce757 旧哈希，提交 ee7347b 后重建才正确）
+
+### 排查：老 TUI 自更新把用户的 xxssh 换成了 xxsshg
+- 用户报：另一台机器升级 xxssh 后，运行却成了 xxsshg
+- 逐渠道取证（全部干净）：产品 API 各版本记录的 platform/file/sha 指向正确；线上 `/downloads/xxssh/xxssh.exe` 下载后 sha 与记录吻合、运行输出 `xxssh 0.5.3`；官网 install/xxssh.ps1 的 URL+sha 校验正确；网页 CLI/GUI 下载按钮分开设；xxsshg 更新器平台过滤（windows+gui 双匹配）安全
+- **真因**：≤0.5.2 的 TUI `--update` 旧逻辑 = "全平台最高 isLatest" + 平台匹配只要求"含 windows"（`"Windows GUI"` 同样命中）。用旧算法对线上数据离线模拟复现：解析出 0.8.7 → 选中 `Windows GUI v0.8.7 → xxsshg.exe` → 覆盖 xxssh.exe（sha 对着 GUI 记录校验，当然通过）。平台作用域修复 dce7b84 是 **v0.5.3 才首次带上**——与 2026-09-05 会话的"遗留"项吻合
+- **处置**：受影响机器跑 `irm https://magicdo.top/install/xxssh.ps1 | iex` 重装回正确 CLI；仓库代码无需再改（0.5.3+ 已带修复）。遗留风险同旧条目：存量 ≤0.5.2 机器只要执行 --update 就会被污染
+
 ## 2026-09-05 发布会话（v0.7.2）：彩色空格背景修复
 
 ### 修复（0.7.1 → 0.7.2）
@@ -226,7 +294,7 @@
 
 - 构建：cargo build --release；测试：cargo test；E2E：XXSSHG_E2E=1（SSH）/ XXSSHG_E2E=2（打字模拟）/ XXSSHG_LOCAL_E2E=1（本地终端）
 - 无头自动连接：XXSSHG_AUTOCONNECT=服务器名（TOFU 自动信任）
-- 发布：改 Cargo.toml 版本 → touch src/main.rs → build → powershell publish-xxsshg-X.Y.Z.ps1（xxssh 根目录）
+- 发布：改 Cargo.toml 版本 → **先 git commit（build hash 来自 HEAD，不提交则二进制带旧哈希）** → touch src/main.rs → build → 核对 `--version` 输出版本+哈希 → powershell publish-xxsshg-X.Y.Z.ps1（xxssh 根目录）
 - ⚠️ 发布前必须关闭运行中的 xxsshg：exe 被占用时链接报 os error 5，**磁盘上仍是旧版**（已两次踩到）
 - 诊断：XXSSHG_DEBUG_CURSOR=1（光标覆盖层+日志 ~/.xxssh/cursor-debug.log）、XXSSHG_PTY_DUMP=文件（原始字节）
 - 会话诊断日志：~/.xxssh/session-debug.log（常开、UTC 时间戳；断线真因/uptime/idle/握手认证失败原因）
