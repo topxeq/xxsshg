@@ -18,6 +18,7 @@ mod sftp;
 mod sftpui;
 mod term;
 mod termup;
+mod tunnel;
 mod txdef;
 mod update;
 mod xconfig;

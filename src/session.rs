@@ -22,6 +22,7 @@ use russh::{ChannelMsg, Disconnect, Pty};
 use tokio::sync::{mpsc, oneshot};
 
 use crate::i18n::{self, Language};
+use crate::tunnel;
 use crate::xconfig::{AuthMethod, Server};
 
 /// Keepalive: send a keepalive every 20s; consider connection dead after 3 unanswered
@@ -81,6 +82,9 @@ pub enum ConnectRequest {
 pub enum SessionEvent {
     /// Connection dead (EOF, keepalive timeout, error). exit_code if the remote sent one.
     Closed { exit_code: Option<u32>, reason: String },
+    /// Port forwards brought up on this session (one "listening" line each).
+    /// Emitted right after the shell (or tunnels-only session) is established.
+    ForwardsUp(Vec<String>),
 }
 
 /// Failure kinds, so the UI can show a localized message per kind
@@ -139,13 +143,16 @@ pub struct SessionHandle {
 /// - a receiver for the connect outcome (`Ok(handle)` / `Err(ConnectError)`),
 /// - a receiver for connect-time questions (`ConnectRequest`) the UI must answer.
 ///
-/// On success the task has already opened the PTY+shell at `cols`x`rows`.
+/// On success the task has already opened the PTY+shell at `cols`x`rows` and
+/// brought the server's `tunnels` forwards up (a bind/refusal failure fails the
+/// whole connect before the shell starts).
 pub fn spawn_connect(
     rt: &tokio::runtime::Handle,
     server: Server,
     opts: ConnectOpts,
     cols: u16,
     rows: u16,
+    forwards: Vec<tunnel::ForwardSpec>,
 ) -> (
     oneshot::Receiver<Result<SessionHandle, ConnectError>>,
     mpsc::UnboundedReceiver<ConnectRequest>,
@@ -154,11 +161,111 @@ pub fn spawn_connect(
     let (req_tx, req_rx) = mpsc::unbounded_channel();
     log::info!("spawn_connect: task spawning for {host}", host = server.host);
     rt.spawn(async move {
-        let res = connect_and_open(server, opts, cols, rows, req_tx).await;
+        let res = connect_and_open(server, opts, cols, rows, req_tx, forwards).await;
         log::info!("spawn_connect: finished, ok={}", res.is_ok());
         let _ = result_tx.send(res);
     });
     (result_rx, req_rx)
+}
+
+/// Live tunnel-only session (no PTY): forwards up, connection held until the UI
+/// closes it (or the connection dies).
+pub struct TunnelHandle {
+    /// One "listening" line per forward, with the actual bound/assigned port.
+    pub lines: Vec<String>,
+    /// `Closed` when the connection drops or the user closes the tab.
+    pub event_rx: mpsc::UnboundedReceiver<SessionEvent>,
+    /// Close the tunnel session (disconnects).
+    pub close_tx: oneshot::Sender<()>,
+}
+
+/// Spawn a tunnels-only connect (no terminal): establish, bring the profile's
+/// `tunnels` up, hold. Same connect-time questions (password / host key) as a
+/// terminal connect, delivered on the same request channel.
+pub fn spawn_tunnels(
+    rt: &tokio::runtime::Handle,
+    server: Server,
+    opts: ConnectOpts,
+) -> (
+    oneshot::Receiver<Result<TunnelHandle, ConnectError>>,
+    mpsc::UnboundedReceiver<ConnectRequest>,
+) {
+    let (result_tx, result_rx) = oneshot::channel();
+    let (req_tx, req_rx) = mpsc::unbounded_channel();
+    rt.spawn(async move {
+        let res = connect_tunnels_only(server, opts, req_tx).await;
+        let _ = result_tx.send(res);
+    });
+    (result_rx, req_rx)
+}
+
+async fn connect_tunnels_only(
+    server: Server,
+    opts: ConnectOpts,
+    requests: mpsc::UnboundedSender<ConnectRequest>,
+) -> Result<TunnelHandle, ConnectError> {
+    let forwards =
+        tunnel::parse_tunnel_list(&server.tunnels).map_err(ConnectError::Other)?;
+    let remote = tunnel::new_remote_table();
+    let (session, _last_disconnect) =
+        establish(server.clone(), opts, requests, remote.clone()).await?;
+    let shared: tunnel::SharedSession = Arc::new(tokio::sync::Mutex::new(session));
+    let mut set = tunnel::spawn_forwards(&shared, &forwards, &remote)
+        .await
+        .map_err(ConnectError::Other)?;
+    let lines = std::mem::take(&mut set.lines);
+
+    let (event_tx, event_rx) = mpsc::unbounded_channel::<SessionEvent>();
+    let (close_tx, mut close_rx) = oneshot::channel::<()>();
+    let host = server.host.clone();
+    let port = server.port;
+    crate::diag::log(&format!(
+        "[{}:{}] tunnels up: {}",
+        host,
+        port,
+        lines.join("; ")
+    ));
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(Duration::from_millis(500));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let mut by_user = false;
+        loop {
+            tokio::select! {
+                _ = &mut close_rx => {
+                    by_user = true;
+                    break;
+                }
+                _ = tick.tick() => {
+                    if shared.lock().await.is_closed() {
+                        break;
+                    }
+                }
+            }
+        }
+        set.abort();
+        let _ = shared
+            .lock()
+            .await
+            .disconnect(
+                Disconnect::ByApplication,
+                if by_user { "tunnels closed" } else { "connection lost" },
+                "en",
+            )
+            .await;
+        crate::diag::log(&format!(
+            "[{}:{}] tunnel session ended (by user: {by_user})",
+            host, port
+        ));
+        let _ = event_tx.send(SessionEvent::Closed {
+            exit_code: None,
+            reason: if by_user {
+                "closed by user".into()
+            } else {
+                "connection lost".into()
+            },
+        });
+    });
+    Ok(TunnelHandle { lines, event_rx, close_tx })
 }
 
 /// Owned-data SOCKS5 connect so the boxed future is Send + 'static
@@ -181,24 +288,54 @@ async fn connect_and_open(
     cols: u16,
     rows: u16,
     requests: mpsc::UnboundedSender<ConnectRequest>,
+    forwards: Vec<tunnel::ForwardSpec>,
 ) -> Result<SessionHandle, ConnectError> {
-    let (session, last_disconnect) = establish(server.clone(), opts, requests.clone()).await?;
-    open_pty_after_auth(session, &server, last_disconnect, cols, rows).await
+    let remote = tunnel::new_remote_table();
+    let (session, last_disconnect) =
+        establish(server.clone(), opts, requests, remote.clone()).await?;
+    open_pty_after_auth(session, &server, last_disconnect, cols, rows, forwards, remote).await
 }
 
 /// Authenticated session -> PTY + shell + endpoints for a GUI terminal tab.
+/// `forwards` (profile `tunnels`) are brought up first: a failure aborts the
+/// connect before the shell opens; on success a `ForwardsUp` event lists them.
+#[allow(clippy::too_many_arguments)]
 async fn open_pty_after_auth(
     session: client::Handle<Handler>,
     server: &Server,
     last_disconnect: Arc<std::sync::Mutex<Option<String>>>,
     cols: u16,
     rows: u16,
+    forwards: Vec<tunnel::ForwardSpec>,
+    remote: tunnel::RemoteTable,
 ) -> Result<SessionHandle, ConnectError> {
+    // Shared so tunnel tasks can open channels while the PTY pump runs.
+    let shared: tunnel::SharedSession = Arc::new(tokio::sync::Mutex::new(session));
+    let mut forwards_lines: Option<Vec<String>> = None;
+    if !forwards.is_empty() {
+        let mut set = tunnel::spawn_forwards(&shared, &forwards, &remote)
+            .await
+            .map_err(ConnectError::Other)?;
+        let lines = std::mem::take(&mut set.lines);
+        crate::diag::log(&format!(
+            "[{}:{}] forwards up alongside shell: {}",
+            server.host,
+            server.port,
+            lines.join("; ")
+        ));
+        // set is intentionally leaked: its listener tasks live until the
+        // session dies (close_tx -> disconnect tears the channel down).
+        std::mem::forget(set);
+        forwards_lines = Some(lines);
+    }
     // Open channel + PTY + shell (PTY modes copied from xxssh)
-    let mut channel = session
-        .channel_open_session()
-        .await
-        .map_err(|e| ConnectError::Other(e.to_string()))?;    let modes: &[(Pty, u32)] = &[(Pty::OPOST, 1), (Pty::ONLCR, 1), (Pty::CS8, 1)];
+    let mut channel = {
+        let s = shared.lock().await;
+        s.channel_open_session()
+            .await
+            .map_err(|e| ConnectError::Other(e.to_string()))?
+    };
+    let modes: &[(Pty, u32)] = &[(Pty::OPOST, 1), (Pty::ONLCR, 1), (Pty::CS8, 1)];
     channel
         .request_pty(false, "xterm-256color", cols as u32, rows as u32, 0, 0, modes)
         .await
@@ -215,6 +352,9 @@ async fn open_pty_after_auth(
     let (event_tx, event_rx) = mpsc::unbounded_channel::<SessionEvent>();
     let (close_tx, mut close_rx) = oneshot::channel::<()>();
 
+    if let Some(lines) = forwards_lines {
+        let _ = event_tx.send(SessionEvent::ForwardsUp(lines));
+    }
     let host = server.host.clone();
     let port = server.port;
     tokio::spawn(async move {
@@ -268,7 +408,9 @@ async fn open_pty_after_auth(
                 // forced close
                 _ = &mut close_rx => {
                     let _ = channel.eof().await;
-                    let _ = session
+                    let _ = shared
+                        .lock()
+                        .await
                         .disconnect(Disconnect::ByApplication, "closed by user", "en")
                         .await;
                     closed = true;
@@ -325,7 +467,9 @@ async fn open_pty_after_auth(
             ));
         }
         let _ = event_tx.send(SessionEvent::Closed { exit_code, reason });
-        let _ = session
+        let _ = shared
+            .lock()
+            .await
             .disconnect(Disconnect::ByApplication, "session end", "en")
             .await;
     });
@@ -344,6 +488,7 @@ async fn establish(
     server: Server,
     opts: ConnectOpts,
     requests: mpsc::UnboundedSender<ConnectRequest>,
+    remote: tunnel::RemoteTable,
 ) -> Result<(client::Handle<Handler>, Arc<std::sync::Mutex<Option<String>>>), ConnectError> {
     let limit = match opts.connect_timeout {
         Some(0) => None,
@@ -430,6 +575,7 @@ async fn establish(
         approved: HashSet::new(),
         reject_reason: None,
         last_disconnect: Arc::new(std::sync::Mutex::new(None)),
+        remote,
     };
     let last_disconnect = handler.last_disconnect.clone();
 
@@ -512,7 +658,7 @@ pub fn spawn_sftp(
     rt.spawn(async move {
         let res = async {
             let (session, _last_disconnect) =
-                establish(server.clone(), opts, req_tx.clone()).await?;
+                establish(server.clone(), opts, req_tx.clone(), tunnel::new_remote_table()).await?;
             let channel = session
                 .channel_open_session()
                 .await
@@ -690,7 +836,7 @@ async fn auth_key(
 // Host key policy (strict / TOFU-file / interactive confirm), following xxssh
 // ---------------------------------------------------------------------------
 
-struct Handler {
+pub(crate) struct Handler {
     host: String,
     port: u16,
     policy_strict: Option<String>,
@@ -706,6 +852,9 @@ struct Handler {
     /// transport-level close reason (server DISCONNECT message or russh error
     /// such as KeepaliveTimeout), captured by the `disconnected` hook below
     last_disconnect: Arc<std::sync::Mutex<Option<String>>>,
+    /// -R mapping (remote listening port -> local target); routes incoming
+    /// forwarded-tcpip channels. Empty when no -R forward is set.
+    remote: tunnel::RemoteTable,
 }
 
 impl client::Handler for Handler {
@@ -729,6 +878,39 @@ impl client::Handler for Handler {
             client::DisconnectReason::ReceivedDisconnect(_) => Ok(()),
             client::DisconnectReason::Error(e) => Err(e),
         }
+    }
+
+    /// `-R`: the server opened a channel because someone connected to the remote
+    /// listener. Look the local target up by port, accept, and pump in a spawned
+    /// task (a slow local target must never stall the session loop).
+    async fn server_channel_open_forwarded_tcpip(
+        &mut self,
+        channel: russh::Channel<russh::client::Msg>,
+        connected_address: &str,
+        connected_port: u32,
+        originator_address: &str,
+        originator_port: u32,
+        reply: russh::client::ChannelOpenHandle,
+        _session: &mut russh::client::Session,
+    ) -> Result<(), Self::Error> {
+        let _ = (connected_address, originator_address, originator_port);
+        let target = self
+            .remote
+            .lock()
+            .ok()
+            .and_then(|t| t.get(&connected_port).cloned());
+        match target {
+            Some((host, port)) => {
+                reply.accept().await;
+                tunnel::pump_forwarded_channel(channel, host, port);
+            }
+            None => {
+                reply
+                    .reject(russh::ChannelOpenFailure::AdministrativelyProhibited)
+                    .await;
+            }
+        }
+        Ok(())
     }
 
     async fn check_server_key(&mut self, key: &ssh_key::PublicKey) -> Result<bool, Self::Error> {
@@ -1024,9 +1206,10 @@ mod e2e_tests {
             key_path: String::new(),
             key_passphrase: String::new(),
             proxy: String::new(),
+            tunnels: Vec::new(),
         };
         let (result_rx, mut req_rx) =
-            spawn_connect(rt.handle(), server, ConnectOpts::default(), 80, 24);
+            spawn_connect(rt.handle(), server, ConnectOpts::default(), 80, 24, Vec::new());
         // Answer host-key confirms in the background
         let ans = std::thread::spawn(move || {
             loop {
@@ -1151,6 +1334,7 @@ mod sftp_e2e_tests {
             key_path: String::new(),
             key_passphrase: String::new(),
             proxy: String::new(),
+            tunnels: Vec::new(),
         };
         let keystore = dirs::home_dir().unwrap().join(".xxssh").join("known_hosts").to_string_lossy().into_owned();
         let opts = ConnectOpts {

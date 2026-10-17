@@ -14,6 +14,7 @@ use crate::i18n::{tpl, tr, Language};
 use crate::local::{self, ShellKind};
 use crate::sftpui::SftpTab;
 use crate::session::{self, ConnectError, ConnectOpts, ConnectRequest, SessionEvent, SessionHandle};
+use crate::tunnel::{self, ForwardSpec};
 use crate::term::Terminal;
 use crate::termup::{TermUp, UpState};
 use crate::xconfig::{load_settings, save_settings, AppSettings, AuthMethod, Server};
@@ -85,6 +86,23 @@ enum Tab {
     Sftp {
         st: Box<SftpTab>,
     },
+    /// Tunnels-only connect in progress (no terminal will open)
+    TunnelConnecting {
+        name: String,
+        result_rx: oneshot::Receiver<Result<session::TunnelHandle, ConnectError>>,
+        request_rx: mpsc::UnboundedReceiver<ConnectRequest>,
+        status: String,
+        server: Server,
+    },
+    /// Live tunnels-only session: forwards up, no terminal
+    Tunnels {
+        name: String,
+        lines: Vec<String>,
+        event_rx: mpsc::UnboundedReceiver<SessionEvent>,
+        closed: Option<String>,
+        close_tx: oneshot::Sender<()>,
+        server: Server,
+    },
 }
 
 impl Tab {
@@ -95,6 +113,7 @@ impl Tab {
             | Tab::Failed { name, .. } => name,
             Tab::Sftp { st } => &st.name,
             Tab::SftpConnecting { name, .. } => name,
+            Tab::TunnelConnecting { name, .. } | Tab::Tunnels { name, .. } => name,
         }
     }
 
@@ -105,6 +124,7 @@ impl Tab {
             Tab::Open { server: Some(s), .. } => Some(s),
             Tab::Failed { server: Some(s), .. } => Some(s),
             Tab::Sftp { st } => Some(&st.server),
+            Tab::Tunnels { server, .. } => Some(server),
             _ => None,
         }
     }
@@ -122,6 +142,8 @@ struct ServerForm {
     key_path: String,
     key_passphrase: String,
     proxy: String,
+    /// Port forwards, one D:/L:/R: entry per line
+    tunnels: String,
     error: Option<String>,
 }
 
@@ -138,6 +160,7 @@ impl ServerForm {
             key_path: String::new(),
             key_passphrase: String::new(),
             proxy: String::new(),
+            tunnels: String::new(),
             error: None,
         }
     }
@@ -154,6 +177,8 @@ impl ServerForm {
             key_path: s.key_path.clone(),
             key_passphrase: s.key_passphrase.clone(),
             proxy: s.proxy.clone(),
+            tunnels: s.tunnels.join("
+"),
             error: None,
         }
     }
@@ -169,6 +194,12 @@ impl ServerForm {
             key_path: self.key_path.trim().to_string(),
             key_passphrase: self.key_passphrase.clone(),
             proxy: self.proxy.trim().to_string(),
+            tunnels: self
+                .tunnels
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect(),
         }
     }
 }
@@ -208,6 +239,7 @@ impl QuickForm {
             key_path: String::new(),
             key_passphrase: String::new(),
             proxy: String::new(),
+            tunnels: Vec::new(),
         }
     }
 }
@@ -405,6 +437,57 @@ impl XxsshgApp {
         self.spawn_connect_tab(server);
     }
 
+    /// Tunnels-only connect for a server row (context menu). Refused with a
+    /// toast when the profile has no `tunnels` entries or one is malformed.
+    fn connect_server_tunnels(&mut self, idx: usize) {
+        let Some(server) = self.servers.get(idx).cloned() else { return };
+        match tunnel::parse_tunnel_list(&server.tunnels) {
+            Ok(f) if !f.is_empty() => self.spawn_tunnel_tab(server),
+            Ok(_) => self.toast(tr(self.lang(), "tnl_none").to_string()),
+            Err(e) => self.toast(tpl(tr(self.lang(), "err_tunnel"), &[("e", &e)])),
+        }
+    }
+
+    /// Parse a profile's `tunnels` for a terminal connect; on a bad entry shows
+    /// a Failed tab (the connect itself never starts half-configured).
+    fn forwards_for(&self, server: &Server) -> Result<Vec<ForwardSpec>, String> {
+        tunnel::parse_tunnel_list(&server.tunnels)
+    }
+
+    /// resolve_opts + the headless-test TOFU override (same as spawn_connect_tab)
+    fn base_opts(&self, server: &Server) -> ConnectOpts {
+        let mut opts = resolve_opts(server, &self.settings);
+        if std::env::var("XXSSHG_AUTOCONNECT").is_ok() {
+            opts.known_hosts_add = Some(
+                dirs::home_dir()
+                    .unwrap_or_default()
+                    .join(".xxssh")
+                    .join("known_hosts")
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+        opts
+    }
+
+    fn spawn_tunnel_tab(&mut self, server: Server) {
+        let opts = self.base_opts(&server);
+        let name = tpl(tr(self.lang(), "tnl_tab"), &[("name", &server.name)]);
+        let status = tpl(
+            tr(self.lang(), "status_connecting"),
+            &[("host", &server.host), ("port", &server.port.to_string())],
+        );
+        let (result_rx, request_rx) = session::spawn_tunnels(&self.rt, server.clone(), opts);
+        self.tabs.push(Tab::TunnelConnecting {
+            name,
+            result_rx,
+            request_rx,
+            status,
+            server,
+        });
+        self.active_tab = self.tabs.len() - 1;
+    }
+
     fn spawn_connect_tab(&mut self, server: Server) {
         let mut opts = resolve_opts(&server, &self.settings);
         // Headless test mode (XXSSHG_AUTOCONNECT): TOFU-trust into the standard
@@ -419,6 +502,19 @@ impl XxsshgApp {
                     .into_owned(),
             );
         }
+        let forwards = match self.forwards_for(&server) {
+            Ok(f) => f,
+            Err(e) => {
+                let msg = tpl(tr(self.lang(), "err_tunnel"), &[("e", &e)]);
+                self.tabs.push(Tab::Failed {
+                    name: server.name.clone(),
+                    error: msg,
+                    server: Some(server),
+                });
+                self.active_tab = self.tabs.len() - 1;
+                return;
+            }
+        };
         let name = server.name.clone();
         let status = tpl(
             tr(self.lang(), "status_connecting"),
@@ -426,7 +522,8 @@ impl XxsshgApp {
         );
         log::info!("connect_server: spawning");
         let (cols, rows) = self.last_grid;
-        let (result_rx, request_rx) = session::spawn_connect(&self.rt, server.clone(), opts, cols, rows);
+        let (result_rx, request_rx) =
+            session::spawn_connect(&self.rt, server.clone(), opts, cols, rows, forwards);
         self.tabs.push(Tab::Connecting {
             name,
             result_rx,
@@ -444,8 +541,47 @@ impl XxsshgApp {
             Some(Tab::Open { server: Some(s), .. }) => s.clone(),
             Some(Tab::Failed { server: Some(s), .. }) => s.clone(),
             Some(Tab::Sftp { st }) => st.server.clone(),
+            Some(Tab::Tunnels { server, .. }) => server.clone(),
             _ => return,
         };
+        // Tunnels-only tab: tear down and respawn the tunnel session in place
+        if matches!(self.tabs.get(idx), Some(Tab::Tunnels { .. })) {
+            let old = std::mem::replace(
+                &mut self.tabs[idx],
+                Tab::Failed { name: String::new(), error: String::new(), server: None },
+            );
+            if let Tab::Tunnels { close_tx, .. } = old {
+                let _ = close_tx.send(());
+            }
+            let name = tpl(tr(self.lang(), "tnl_tab"), &[("name", &server.name)]);
+            match tunnel::parse_tunnel_list(&server.tunnels) {
+                Ok(f) if !f.is_empty() => {
+                    let opts = self.base_opts(&server);
+                    let status = tpl(
+                        tr(self.lang(), "status_connecting"),
+                        &[("host", &server.host), ("port", &server.port.to_string())],
+                    );
+                    let (result_rx, request_rx) =
+                        session::spawn_tunnels(&self.rt, server.clone(), opts);
+                    self.tabs[idx] = Tab::TunnelConnecting {
+                        name,
+                        result_rx,
+                        request_rx,
+                        status,
+                        server,
+                    };
+                }
+                Ok(_) => {
+                    self.tabs[idx] = Tab::Failed { name, error: tr(self.lang(), "tnl_none").to_string(), server: Some(server) };
+                }
+                Err(e) => {
+                    let msg = tpl(tr(self.lang(), "err_tunnel"), &[("e", &e)]);
+                    self.tabs[idx] = Tab::Failed { name, error: msg, server: Some(server) };
+                }
+            }
+            self.active_tab = idx;
+            return;
+        }
         // SFTP tab: tear down the old session, respawn SftpConnecting in place
         if matches!(self.tabs.get(idx), Some(Tab::Sftp { .. })) {
             let old = std::mem::replace(
@@ -500,8 +636,18 @@ impl XxsshgApp {
             up.shutdown();
             let _ = handle.close_tx.send(());
         }
+        let forwards = match self.forwards_for(&server) {
+            Ok(f) => f,
+            Err(e) => {
+                let msg = tpl(tr(self.lang(), "err_tunnel"), &[("e", &e)]);
+                self.tabs[idx] = Tab::Failed { name: server.name.clone(), error: msg, server: Some(server) };
+                self.active_tab = idx;
+                return;
+            }
+        };
         let (cols, rows) = self.last_grid;
-        let (result_rx, request_rx) = session::spawn_connect(&self.rt, server.clone(), opts, cols, rows);
+        let (result_rx, request_rx) =
+            session::spawn_connect(&self.rt, server.clone(), opts, cols, rows, forwards);
         self.tabs[idx] = Tab::Connecting {
             name,
             result_rx,
@@ -573,15 +719,21 @@ impl XxsshgApp {
                 st.cleanup();
                 let _ = st.close_tx.send(());
             }
+            Tab::Tunnels { close_tx, .. } => {
+                let _ = close_tx.send(());
+            }
             _ => {}
         }
         self.active_tab = self.active_tab.min(self.tabs.len().saturating_sub(1));
     }
 
     fn has_open_session(&self) -> bool {
-        self.tabs
-            .iter()
-            .any(|t| matches!(t, Tab::Open { closed: None, .. } | Tab::Sftp { .. }))
+        self.tabs.iter().any(|t| {
+            matches!(
+                t,
+                Tab::Open { closed: None, .. } | Tab::Sftp { .. } | Tab::Tunnels { closed: None, .. }
+            )
+        })
     }
 
     // -- self-update ---------------------------------------------------------
@@ -794,6 +946,29 @@ impl XxsshgApp {
             }
         }
 
+        // 1a-bis. Tunnels-only connecting: auth questions (same dialog machinery)
+        for i in 0..self.tabs.len() {
+            if let Tab::TunnelConnecting { request_rx, .. } = &mut self.tabs[i] {
+                if self.question.is_none() {
+                    if let Some(req) = request_rx.try_recv().ok() {
+                        self.question = Some(PendingQuestion {
+                            question: match req {
+                                ConnectRequest::Password { user, host, respond } => {
+                                    Question::Password { user, host, respond: Some(respond), input: String::new() }
+                                }
+                                ConnectRequest::Passphrase { path, respond } => {
+                                    Question::Passphrase { path, respond: Some(respond), input: String::new() }
+                                }
+                                ConnectRequest::HostKey { host, port, fingerprint, changed, respond } => {
+                                    Question::HostKey { host, port, fingerprint, changed, respond: Some(respond) }
+                                }
+                            },
+                        });
+                    }
+                }
+            }
+        }
+
         // 1b. SFTP connecting: auth questions + results
         for i in 0..self.tabs.len() {
             if let Tab::SftpConnecting { request_rx, .. } = &mut self.tabs[i] {
@@ -891,6 +1066,43 @@ impl XxsshgApp {
             }
         }
 
+        // 2a-bis. Tunnels-only connect results
+        for i in 0..self.tabs.len() {
+            let res = if let Tab::TunnelConnecting { result_rx, .. } = &mut self.tabs[i] {
+                match result_rx.try_recv() {
+                    Ok(r) => Some(r),
+                    Err(oneshot::error::TryRecvError::Closed) => {
+                        Some(Err(ConnectError::Other("connect task crashed (see log)".into())))
+                    }
+                    Err(_) => None,
+                }
+            } else {
+                None
+            };
+            if let Some(res) = res {
+                let (name, server) = match self.tabs.get(i) {
+                    Some(Tab::TunnelConnecting { name, server, .. }) => (name.clone(), server.clone()),
+                    _ => continue,
+                };
+                match res {
+                    Ok(handle) => {
+                        self.tabs[i] = Tab::Tunnels {
+                            name,
+                            lines: handle.lines,
+                            event_rx: handle.event_rx,
+                            closed: None,
+                            close_tx: handle.close_tx,
+                            server,
+                        };
+                    }
+                    Err(e) => {
+                        let msg = e.message(lang);
+                        self.tabs[i] = Tab::Failed { name, error: msg, server: Some(server) };
+                    }
+                }
+            }
+        }
+
         // 2b. SFTP connect results (bounded borrow: try_recv first, then re-own)
         for i in 0..self.tabs.len() {
             let res = if let Tab::SftpConnecting { result_rx, .. } = &mut self.tabs[i] {
@@ -935,6 +1147,7 @@ impl XxsshgApp {
         }
 
         // 3. Drain PTY output / titles / bells / close events of open tabs
+        let mut forwards_up: Vec<(usize, Vec<String>)> = Vec::new();
         for i in 0..self.tabs.len() {
             if let Tab::Open { term, title_rx, bell_rx, handle, closed, bell_flash, .. } =
                 &mut self.tabs[i]
@@ -959,16 +1172,40 @@ impl XxsshgApp {
                 if bell_rx.try_recv().is_ok() {
                     term.bell = true;
                 }
-                if let Some(SessionEvent::Closed { exit_code, reason }) = handle.event_rx.try_recv().ok() {
-                    log::info!("session closed: {reason} (exit {exit_code:?})");
-                    *closed = Some(match exit_code {
-                        Some(c) => format!("{reason} (exit {c})"),
-                        None => reason,
-                    });
+                if let Some(ev) = handle.event_rx.try_recv().ok() {
+                    match ev {
+                        SessionEvent::Closed { exit_code, reason } => {
+                            log::info!("session closed: {reason} (exit {exit_code:?})");
+                            *closed = Some(match exit_code {
+                                Some(c) => format!("{reason} (exit {c})"),
+                                None => reason,
+                            });
+                        }
+                        SessionEvent::ForwardsUp(lines) => {
+                            forwards_up.push((i, lines));
+                        }
+                    }
                 }
                 if term.bell {
                     term.bell = false;
                     *bell_flash = true;
+                }
+            }
+        }
+        for (_, lines) in forwards_up {
+            self.toast(lines.join("  "));
+        }
+
+        // 4. Tunnel tabs: lifecycle events
+        for i in 0..self.tabs.len() {
+            let ev = if let Tab::Tunnels { event_rx, .. } = &mut self.tabs[i] {
+                event_rx.try_recv().ok()
+            } else {
+                None
+            };
+            if let Some(SessionEvent::Closed { reason, .. }) = ev {
+                if let Some(Tab::Tunnels { closed, .. }) = self.tabs.get_mut(i) {
+                    *closed = Some(reason);
                 }
             }
         }
@@ -1140,7 +1377,11 @@ impl XxsshgApp {
             .show(ui, |ui| {
             for i in 0..self.servers.len() {
                 let name = self.servers[i].name.clone();
-                let host = format!("{}@{}:{}", self.servers[i].username, self.servers[i].host, self.servers[i].port);
+                let mut host = format!("{}@{}:{}", self.servers[i].username, self.servers[i].host, self.servers[i].port);
+                if !self.servers[i].tunnels.is_empty() {
+                    // visible cue that connecting this server also brings up tunnels
+                    host.push_str(&format!("  [T x{}]", self.servers[i].tunnels.len()));
+                }
                 let resp = ui.selectable_label(
                     i == self.selected_server,
                     egui::RichText::new(format!("{name}\n  {host}")),
@@ -1190,6 +1431,14 @@ impl XxsshgApp {
                     ui.separator();
                     if ui.button(tpl(tr(self.lang(), "menu_sftp"), &[])).clicked() {
                         self.open_sftp_for(i);
+                        ui.close();
+                    }
+                    let tunnels_item = ui.add_enabled(
+                        !self.servers[i].tunnels.is_empty(),
+                        egui::Button::new(tpl(tr(self.lang(), "menu_tunnels"), &[])),
+                    );
+                    if tunnels_item.clicked() {
+                        self.connect_server_tunnels(i);
                         ui.close();
                     }
                 });
@@ -1277,6 +1526,7 @@ impl XxsshgApp {
             }
         }
         let i = self.active_tab;
+        let lang = self.lang();
         let mut do_reconnect = false;
         let mut do_close = false;
         let mut up_note: Option<String> = None;
@@ -1313,6 +1563,48 @@ impl XxsshgApp {
                     ui.label(status.clone());
                     ui.spinner();
                 });
+            }
+            Tab::TunnelConnecting { status, .. } => {
+                ui.centered_and_justified(|ui| {
+                    ui.label(status.clone());
+                    ui.spinner();
+                });
+            }
+            Tab::Tunnels { lines, closed, server, .. } => {
+                if let Some(reason) = closed.clone() {
+                    ui.centered_and_justified(|ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(48.0);
+                            ui.label(tpl(tr(lang, "status_closed"), &[("reason", &reason)]));
+                            ui.add_space(10.0);
+                            if ui.button(tpl(tr(lang, "btn_reconnect"), &[])).clicked() {
+                                do_reconnect = true;
+                            }
+                            if ui.button(tpl(tr(lang, "btn_close_tab"), &[])).clicked() {
+                                do_close = true;
+                            }
+                        });
+                    });
+                } else {
+                    ui.centered_and_justified(|ui| {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(48.0);
+                            ui.heading(tpl(tr(lang, "tnl_title"), &[("name", server.name.as_str())]));
+                            ui.add_space(12.0);
+                            for line in lines {
+                                ui.label(
+                                    egui::RichText::new(format!("● {line}"))
+                                        .color(egui::Color32::LIGHT_GREEN)
+                                        .monospace(),
+                                );
+                            }
+                            ui.add_space(12.0);
+                            ui.label(
+                                egui::RichText::new(tr(lang, "tnl_hint")).weak().small(),
+                            );
+                        });
+                    });
+                }
             }
             Tab::Open { term, handle, resize_sent, closed, bell_flash, server, up, .. } => {
                 if let Some(reason) = closed.clone() {
@@ -1517,6 +1809,13 @@ impl XxsshgApp {
                         ui.label(tr(lang, "f_proxy"));
                         ui.text_edit_singleline(&mut form.proxy);
                         ui.end_row();
+                        ui.label(tr(lang, "f_tunnels"));
+                        ui.add(
+                            egui::TextEdit::multiline(&mut form.tunnels)
+                                .hint_text(tr(lang, "f_tunnels_hint"))
+                                .desired_width(220.0),
+                        );
+                        ui.end_row();
                     });
                 if let Some(err) = &form.error {
                     ui.colored_label(egui::Color32::LIGHT_RED, err);
@@ -1537,6 +1836,9 @@ impl XxsshgApp {
                     self.form.as_mut().unwrap().error = Some(tr(lang, "err_name_required").into());
                 } else if built.host.is_empty() {
                     self.form.as_mut().unwrap().error = Some(tr(lang, "err_host_required").into());
+                } else if let Err(e) = tunnel::parse_tunnel_list(&built.tunnels) {
+                    self.form.as_mut().unwrap().error =
+                        Some(tpl(tr(lang, "err_tunnel"), &[("e", &e)]));
                 } else {
                     match self.form.as_ref().unwrap().editing {
                         Some(idx) => self.servers[idx] = built,
@@ -2069,7 +2371,13 @@ impl eframe::App for XxsshgApp {
         // and input events still trigger immediate repaints on their own.
         self.poll_tabs();
         let live = self.tabs.iter().any(|t| {
-            matches!(t, Tab::Connecting { .. } | Tab::Open { closed: None, .. })
+            matches!(
+                t,
+                Tab::Connecting { .. }
+                    | Tab::Open { closed: None, .. }
+                    | Tab::TunnelConnecting { .. }
+                    | Tab::Tunnels { closed: None, .. }
+            )
         });
         if live {
             let recent_output = self

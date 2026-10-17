@@ -45,6 +45,12 @@ pub struct Server {
     pub key_passphrase: String,
     #[serde(default)]
     pub proxy: String,
+    /// Port forwards started on every connect ("D:1080", "L:8080:db:5432",
+    /// "R:0.0.0.0:80:localhost:3000" — same entries xxssh stores). Extra field:
+    /// older xxssh builds still load files written with it (unknown JSON keys are
+    /// ignored) but drop the list when they resave.
+    #[serde(default)]
+    pub tunnels: Vec<String>,
 }
 
 fn default_port() -> u16 {
@@ -247,18 +253,19 @@ mod tests {
             key_path: "C:/keys/id_ed25519".into(),
             key_passphrase: "phrase".into(),
             proxy: String::new(),
+            tunnels: Vec::new(),
         }];
         save(&path, &servers).unwrap();
         let text = fs::read_to_string(&path).unwrap();
         let v: serde_json::Value = serde_json::from_str(&text).unwrap();
         let entry = &v.as_array().unwrap()[0];
-        // Exact field set of xxssh 0.5.2 Server
+        // Exact field set of the xxssh Server (0.5.4+: includes `tunnels`)
         // serde_json emits keys alphabetically (same as xxssh's default), so compare sets
         let mut fields: Vec<&str> = entry.as_object().unwrap().keys().map(|s| s.as_str()).collect();
         fields.sort_unstable();
         assert_eq!(
             fields,
-            vec!["auth", "host", "key_passphrase", "key_path", "name", "password", "port", "proxy", "username"]
+            vec!["auth", "host", "key_passphrase", "key_path", "name", "password", "port", "proxy", "tunnels", "username"]
         );
         assert_eq!(entry["auth"], "key");
         // Secrets must NOT appear in plaintext on disk (values are TXDEF ciphertext: uppercase hex)
@@ -289,6 +296,7 @@ mod tests {
                 key_path: String::new(),
                 key_passphrase: String::new(),
                 proxy: String::new(),
+                tunnels: Vec::new(),
             },
             Server {
                 name: "b".into(),
@@ -300,6 +308,7 @@ mod tests {
                 key_path: "/home/u/.ssh/id_rsa".into(),
                 key_passphrase: "pass".into(),
                 proxy: "socks5://127.0.0.1:1080".into(),
+                tunnels: vec!["D:1080".into()],
             },
         ];
         save(&path, &servers).unwrap();

@@ -1,5 +1,28 @@
 # xxsshg 开发与发布经验
 
+## russh 端口转发：OpenSSH 的 tcpip-forward 成功应答在指定端口时不带端口号
+
+### 问题
+`-R 127.0.0.1:11999:...` 注册成功（打印却成了 `remote 127.0.0.1:0`），远端 `/dev/tcp` 能连上
+11999 但立即 EOF；客户端侧 forwarded-tcpip 回来时查 `RemoteTable` 落空被拒。
+
+### 根因
+RFC 4254 的 tcpip-forward 确认应答只在**客户端请求端口 0**（服务器分配）时才携带 uint32 端口；
+OpenSSH 对"指定了具体端口"的请求回的是**空载荷的成功应答**。russh `Handle::tcpip_forward`
+把空应答解析成 0 并返回。我们据此把「远端端口 → 本地目标」映射注册到了 0 号端口，
+而服务器实际绑定的还是请求的 11999，回连 `connected_port=11999` 自然查不到。
+
+### 修复
+`let bound = if replied == 0 { requested } else { replied };` —— 应答为 0 即视为
+"端口原样绑定"，两处（注册表 key、对外展示行）都用 bound。CLI/GUI 两份 tunnel.rs 同步修。
+
+### 关键点
+- 第三方库对协议边界情况的"合理化"返回值（这里是 0）必须对照服务器实现（OpenSSH
+  仅 0 请求时回显端口）确认语义，不能直接当真值用。
+- 这类 bug 的表层现象（连上但空数据）与根因（查表 key 不匹配）隔了一层：先用
+  `/dev/tcp`+`od` 确认"连接成功、零字节 EOF"，再倒推到 accept→open-channel→查表
+  链路，比盯客户端日志快得多。
+
 ## eframe/tokio：Runtime 绝不能移进 App 创建闭包
 
 ### 问题

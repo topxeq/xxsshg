@@ -121,6 +121,23 @@ Config: ~/.xxssh (servers.json / settings.json / gui.json)", "轻量级图形 SS
     ("s_font", "Terminal font", "终端字体", "終端字體"),
     ("hk_close_tab", "Close tab hotkey", "关闭页签热键", "關閉頁籤熱鍵"),
     ("menu_sftp", "SFTP file manager", "SFTP 文件管理", "SFTP 檔案管理"),
+    ("menu_tunnels", "Connect tunnels only (no terminal)", "仅连接隧道（不开终端）", "僅連線隧道（不開終端）"),
+    ("tnl_tab", "Tunnels: {name}", "隧道: {name}", "隧道: {name}"),
+    ("tnl_title", "Tunnels — {name}", "隧道 — {name}", "隧道 — {name}"),
+    ("tnl_hint", "Tunnels stay up while this tab is open; close the tab to disconnect.", "隧道在本标签页打开期间保持连接；关闭标签页即断开。", "隧道在本標籤頁開啟期間保持連線；關閉標籤頁即斷線。"),
+    ("tnl_none", "This server has no tunnels configured (edit the server, one D:/L:/R: entry per line)", "该服务器未配置隧道（编辑服务器，每行一条 D:/L:/R:）", "該伺服器未配置隧道（編輯伺服器，每行一條 D:/L:/R:）"),
+    ("f_tunnels", "Tunnels", "隧道", "隧道"),
+    ("f_tunnels_hint", "One per line:
+D:1080
+L:8080:db.internal:5432
+R:0.0.0.0:80:localhost:3000", "每行一条：
+D:1080
+L:8080:db.internal:5432
+R:0.0.0.0:80:localhost:3000", "每行一條：
+D:1080
+L:8080:db.internal:5432
+R:0.0.0.0:80:localhost:3000"),
+    ("err_tunnel", "Invalid tunnel: {e}", "隧道配置无效：{e}", "隧道配置無效：{e}"),
     ("menu_clear", "Clear buffer", "清空缓冲区", "清空緩衝區"),
     ("menu_copy_buffer", "Copy buffer", "复制缓冲区", "複製緩衝區"),
     // ---- self-update ----

@@ -6,9 +6,39 @@
 
 ---
 
+## 2026-10-17 功能（CLI+GUI）：端口转发/隧道，免终端（-D SOCKS5 / -L / -R / -N + 服务器 tunnels 配置）
+
+### CLI（repo，0.5.4 基础上，未 bump 版本）
+- 新增 `src/tunnel.rs` 转发引擎：`ForwardSpec`（Dynamic/Local/Remote）+ 解析（`-D [bind:]port`、`-L/-R [bind:]port:host:rport`，bind 缺省 127.0.0.1，R 缺省 ""）+ 监听任务（`tokio::io::copy_bidirectional` 泵）+ 自实现 RFC1928 SOCKS5 服务端（无认证、仅 CONNECT，远端解析域名=socks5h 语义）
+- russh `Handle` 不可 Clone：会话包成 `Arc<tokio::sync::Mutex<Handle>>`（`SharedSession`）供 PTY 循环与全部转发任务共享；`-R` 经 `Handler::server_channel_open_forwarded_tcpip` 回连本地目标（按端口查 `RemoteTable`，慢目标 spawn 泵不阻塞会话循环）
+- `ssh.rs`：`run_session` 增参 `(cli_forwards, no_shell)`；每次连接自动带上 profile 的 `tunnels` 列表；`-N` 免终端模式（无 PTY/不进 raw mode，等 Ctrl+C 或连接死亡，建立失败退出码 1）；PTY 与转发互不影响，任一转发建立失败则整个连接失败（不会起一半）
+- `main.rs`：`-D/-L/--dynamic/-N/--no-shell` 可重复、可叠加在 profile tunnels 之上；`-N` 不再 require TTY（脚本可用）；help 新增 `--help tunnel` 主题（TOPICS/AGENTS 任务表同步）
+- `config.rs`：`Server.tunnels: Vec<String>`（`#[serde(default)]`，条目 `D:1080` / `L:8080:db:5432` / `R:0.0.0.0:80:localhost:3000`）；旧版本 xxssh 读新文件忽略未知字段、重存时丢弃（降级安全）
+- TUI 服务器编辑表单第 10 个字段"隧道"（逗号分隔，保存时校验）；i18n 三语补齐（fw_*、field_tunnels、err_tunnel 等）
+- Cargo.toml tokio 补 `net`、`signal` feature；193 测试全过
+
+### GUI（repo-gui，0.8.9 基础上，未 bump 版本）
+- `tunnel.rs`（引擎同 CLI，错误消息中性英文、类型 pub）；`xconfig.rs` Server 加 `tunnels`（schema 契约测试字段集更新为含 tunnels 的 0.5.4 版）
+- `session.rs`：`spawn_connect` 增 `forwards` 参数（带终端连接同时拉起隧道，成功后发 `SessionEvent::ForwardsUp(lines)` → toast）；新增 `spawn_tunnels`/`TunnelHandle`（纯隧道会话：建立→保持→close_tx 断开/掉线通知）
+- `app.rs`：新 Tab 变体 `TunnelConnecting`/`Tunnels`（绿点列表显示各监听行，复用连接问答对话框/重连/关闭标签页生命周期）；服务器右键菜单加"仅连接隧道（不开终端）"（无 tunnels 配置时禁用/提示）；服务器行有 `[T xN]` 标记；表单加多行隧道输入（逐行校验）；带终端连接同样自动拉起该服务器的 tunnels
+- i18n 三语补齐（menu_tunnels/tnl_*/f_tunnels/err_tunnel）；61 测试全过，构建通过
+
+### 关键 bug（真机发现并修复）
+- `-R` 指定端口时 OpenSSH 的 tcpip-forward 成功应答**不带端口号**（仅请求 0 时才回显），russh `tcpip_forward` 因此返回 0 → 映射表错注册到 0 号端口，服务器回连 11999 时查表失败被拒（现象：/dev/tcp 连上但 EOF）。修复：`bound = replied==0 ? 请求端口 : replied`（详见 exp1.md）
+
+### 验证（真机 bt.topget.org）
+- `xxssh bt -N -D 127.0.0.1:11080 -L 127.0.0.1:11022:127.0.0.1:22 -R 127.0.0.1:11999:127.0.0.1:22`：三条隧道同会话拉起；SOCKS5 握手+CONNECT 取回远端 sshd banner ✓；-L 读回 banner ✓；-R 由服务器 /dev/tcp 回连穿回本机 22 端口取回 banner ✓；进程存活保持、taskkill 后清理正常
+
+### 未做/后续
+- 未发版（按惯例下次发布时 bump 仓库版本+commit+publish 脚本）；-L/-R 目标字段暂不支持 IPv6 字面量（bind 支持 [::1]）；SOCKS5 不支持 BIND/UDP ASSOCIATE（回 0x07）
+- 未提交 git（两仓库均未 commit）
+
+---
+
 ## 2026-10-14 勘误（GUI）："PSReadLine 回车失效"是假警报，未修、无需发版
 
-- 0.8.9 发布记录里的"遗留观察项"（ConPTY 重新开启 win32-input-mode 导致 PowerShell 回车失效）经对照实验**证伪**：生产代码路径（Terminal 模型经 EventProxy 自动应答 CPR）下，PowerShell 的裸回车直接可用——探针测试 `exit` 后会话 10.2 秒内正常关闭
+- 0.8.9 发布记录里的"遗留观察项"（ConPTY 重新开启 win32-input-mode 导致 PowerShell 回车失效）经对照实验**证伪**：生产代码路径（Terminal 模型经 EventProxy 自动应答 CPR）下，PowerShell 的裸回车直接可用——探针测试 `exit
+` 后会话 10.2 秒内正常关闭
 - 假警报根因：spike 阶段一次实验同时改了两个变量（CPR 应答时序 + 9001h 处理），把"及时应答 CPR"的功劳记在了"补发 9001l"上；后续阴性验证（禁用 fix 仍通过）暴露了矛盾
 - 处置：撤销了临时的 `conpty_input_fix` 辅助函数与 app.rs 输出泵接入（未出过提交）；探针转为常驻断言测试 `conpty_enter_production_shape`（XXSSHG_LOCAL_E2E=1，守护"本地 PowerShell 回车可用"）
 - 教训：一次只改一个变量；"修复"在阴性验证通过之前不算成立。0.8.9 无此问题，不需要 0.8.10
