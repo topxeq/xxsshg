@@ -6,6 +6,17 @@
 
 ---
 
+## 2026-10-17 发布：CLI v0.5.5 四平台 + GUI v0.9.0（端口转发/隧道）
+
+- CLI：e551a21（功能+版本号 0.5.5+conf.json 描述，先提交）→ tag v0.5.5 推送 → release.yml 全绿（run 38993740163，windows/linux/linux-arm64/macos + release 资产）→ 产物下载放置 → 4 个 publish-0.5.5*.ps1 逐平台发布 + 各自 cleanup（0.5.4 条目已删）
+- GUI：f9a0110（功能+文档+0.9.0，先提交）→ touch 重编 → `--version` 核对 `v0.9.0 (f9a0110)` → publish-xxsshg-0.9.0.ps1（0.8.9 版复制改版号，BOM 保持）→ vid=ver-17922030702f7527，17.85MB，sha256 3c8dd629…c766；cleanup 删 0.8.9
+- 公网验证：/api/products latest = Windows v0.5.5 / Linux x64 v0.5.5 / Linux ARM64 v0.5.5 / macOS v0.5.5 / Windows GUI v0.9.0；install 端点 .ps1/.sh 均 Version: 0.5.5（内嵌 sha 校验一致）；实下 xxsshg.exe sha 与记录一致、运行输出 `xxsshg v0.9.0 (f9a0110)`；实下 xxssh.exe sha=eac33e5a… 与 API/安装脚本一致、输出 0.5.5；抽验 Linux x64 实下 sha=7c03fa28… 与 API 一致
+- 已推送：github.com/topxeq/xxssh（8459a36..e551a21 + tag v0.5.5）、github.com/topxeq/xxsshg（3fa0e04..f9a0110）
+- 备忘：CLI 四平台产物自此全部走 tag→Actions（release.yml），Windows 也用 CI 产物（同源一致），测试服务器 musl 手工构建路径不再需要
+
+---
+---
+
 ## 2026-10-17 功能（CLI+GUI）：端口转发/隧道，免终端（-D SOCKS5 / -L / -R / -N + 服务器 tunnels 配置）
 
 ### CLI（repo，0.5.4 基础上，未 bump 版本）
