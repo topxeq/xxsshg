@@ -6,6 +6,17 @@
 
 ---
 
+## 2026-10-17 发布：CLI v0.5.6（SOCKS5 修复）+ GUI v0.10.0（隧道管理界面）
+
+- CLI：6591db6（SOCKS5 垃圾应答修复 + 0.5.6 + conf.json 描述）→ tag v0.5.6 → release.yml 全绿（run 38999187542）→ 4 个 publish-0.5.6*.ps1 逐平台发布，vid：Windows ver-17922084422860c2 / Linux x64 ver-17922084852b95ed / ARM64 ver-1792208494e02164 / macOS ver-17922085025d92d8；各平台 0.5.5 已删
+- GUI：24224e2（隧道一期/二期 + 0.10.0）→ touch 重编 → `--version` 核对 `v0.10.0 (24224e2)` → publish-xxsshg-0.10.0.ps1 → vid=ver-1792208131c5cb29，18.08MB，sha256 9b05a0a4…bf6c；cleanup 删 0.9.0
+- 公网验证：latest 5 平台 = Windows GUI v0.10.0 + CLI 四平台 v0.5.6；install 端点 .ps1/.sh 均 0.5.6；实下 xxsshg.exe sha=9b05a0a4 与记录一致、运行输出 `v0.10.0 (24224e2)`；实下 xxssh.exe sha=469caf71 一致、输出 0.5.6；Linux x64 实下 sha=dd91e0e0
+- **踩坑（新）**：publish 脚本中途重跑产生了 Windows v0.5.6 **重复条目**（两个 vid 都 isLatest；脚本的已有版本复用检查没接住，cleanup 只删"非本版本"拦不住同版本重复）——用 cleanup 的 DELETE 接口按 vid 手工删掉多余条目后恢复正常。教训：发布脚本一次跑完，确需重跑时先查 /api/products 是否已有该版本
+- 已推送：github.com/topxeq/xxssh（e551a21..6591db6 + tag v0.5.6）、github.com/topxeq/xxsshg（7d99836..24224e2）
+
+---
+---
+
 ## 2026-10-17 自查修复（GUI+CLI）：隧道一期/二期代码全面复查，修 6 处
 
 逐文件复查（借用/生命周期/边界条件/i18n 完整性脚本交叉比对），发现并修复：
