@@ -193,6 +193,7 @@ pub fn spawn(
         output_rx,
         event_rx,
         close_tx,
+        tunnel: None,
     })
 }
 

@@ -6,6 +6,52 @@
 
 ---
 
+## 2026-10-17 自查修复（GUI+CLI）：隧道一期/二期代码全面复查，修 6 处
+
+逐文件复查（借用/生命周期/边界条件/i18n 完整性脚本交叉比对），发现并修复：
+
+- **A（严重，泄漏）终端会话的隧道监听不随会话消亡**：PTY 泵任务结束（断线/关标签）从不清理 controller——server.tunnels 的监听端口会永久占用。修复：controller 传入泵任务，结束时 `abort_all()`（open_pty_after_auth 签名改为收 shared+controller，connect_and_open 负责建立）
+- **B（bug）-R 端口 0（服务器分配）时远端表清理错键**：remove/abort_all 用 spec.port 清 `RemoteTable`，而表键是实际 bound 端口。修复：ForwardRuntime 增加 `remote_bound: Option<u32>`
+- **C（bug，CLI 同修）SOCKS5 垃圾输入误发应答**：握手 Err(rep) 对 rep==0（协议垃圾/方法已回 0xFF）也写应答字节——方法拒绝路径会连发两个应答，垃圾连接会收到"成功"。修复：`Err(rep) if rep != 0`（repo 与 repo-gui 两份引擎同改）
+- **D（UX）快速隧道临时目标 host 为空不拦截**：补 err_host_required 校验
+- **E（egui）面板 grid id 冲突**：隧道标签页与浮窗同帧渲染时 `tunnel_rows`/`tunnel_add_grid` id 相同——`tunnel_panel_ui` 增加 id_prefix 参数
+- **F（bug）`col_port` 键缺失**：添加转发表单端口标签渲染为 "(?)"——GUI i18n 表补键（CLI 有、GUI 没有）
+
+复查确认无问题的点：conns/流量统计方向语义（↑=客户端→目标）；TunnelConnecting 中途关标签（close_tx drop → 监视器按 by_user 收尾）；快隧去重按解析后规则而非字符串；借用电（渲染器收集意图、borrow 结束统一执行）；`tr()` 引用键与 i18n 表脚本交叉比对 0 缺失。
+
+复验：GUI 63 / CLI 193 测试全过，双侧 release 构建通过，GUI 启动冒烟（本次按 PID 清理）。
+
+---
+---
+
+## 2026-10-17 功能（GUI，未发布）：隧道一期+二期——快速隧道、隧道管理面板、动态增删与流量统计
+
+### 底座重构（tunnel.rs）
+- `ForwardSet`（一次性任务集合）升级为 **`TunnelController`**：`start/add_forward/remove_forward/list/abort_all`，一条 SSH 会话的转发可随时增删（-R 走 `cancel_tcpip_forward`，用注册时的原始 bind 串）
+- **`FwdStats`**：每条转发 conns/up/down（AtomicU64），`copy_bidirectional` 返回值不再丢弃；`conns` 在通道建立时计数
+- `RemoteTable` 值升级为 (host, port, stats)；`spec_from_parts`（表单直构）与 `ForwardSpec::to_entry()`（规范存储串，测试锁定与 parse 往返一致）
+- `list()` 用 std Mutex、无 await，UI 每帧调用无成本
+
+### session.rs
+- `SessionHandle.tunnel: Option<SharedController>`（本地 shell 为 None）——SSH 终端会话即使 0 条配置隧道也带 controller，UI 可随时加
+- `spawn_tunnels(rt, server, opts, forwards)`：转发放到显式参数（快速隧道的临时转发不落盘也能起）；`TunnelHandle { controller, event_rx, close_tx }`（lines 字段移除，面板直接 list()）
+
+### 一期 UI（app.rs）
+- **快速隧道对话框**：侧栏新增 ⛓ 按钮（布局改为 3 个方形按钮）；服务器右键「快速隧道...」（预填该服务器现有 tunnels）；服务器下拉含「临时 user@host（不保存）」项；**仅本次连接** / **保存到服务器**（按解析后的规则去重合并，不按字符串形态）双动作；逐行校验带行号报错
+- **终端 tab 微标**：标题 `name [T n]`（n=list().len()，>0 才显示）
+- **终端 tab 右键「隧道...」浮窗**：管理当前会话转发（与隧道标签页共用 panel）
+
+### 二期 UI
+- **Tunnels 标签页 → 管理面板**（`tunnel_panel_ui`，与浮窗共用）：每行 ● + 描述（实际端口）+ `连接 n ↑up ↓down` + 💾保存到服务器 + ✕动态摘除；内联「+ 添加转发」表单（D/L/R 切换、目标列语义标签随类型变化、行内校验）
+- 异步操作反馈：`ctrl_fb` 通道 → toast（已添加/已移除/失败原因）；`run_tunnel_actions` 在 borrow 结束后统一执行（egui immediate-mode 借用约束的成熟模式：渲染器收集意图、调用方执行）
+
+### 验证
+- 63 测试全过（新增 spec_from_parts 校验、to_entry 往返 2 个）；release 构建通过；启动冒烟 5s 无崩溃（注：冒烟按映像名 taskkill 误杀了一个可能在用的 xxsshg 实例——后续按 PID 杀）
+- 未发版未提交；待用户验证 UI 后走发布流程
+
+---
+---
+
 ## 2026-10-17 发布：CLI v0.5.5 四平台 + GUI v0.9.0（端口转发/隧道）
 
 - CLI：e551a21（功能+版本号 0.5.5+conf.json 描述，先提交）→ tag v0.5.5 推送 → release.yml 全绿（run 38993740163，windows/linux/linux-arm64/macos + release 资产）→ 产物下载放置 → 4 个 publish-0.5.5*.ps1 逐平台发布 + 各自 cleanup（0.5.4 条目已删）

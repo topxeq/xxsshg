@@ -97,7 +97,7 @@ enum Tab {
     /// Live tunnels-only session: forwards up, no terminal
     Tunnels {
         name: String,
-        lines: Vec<String>,
+        controller: tunnel::SharedController,
         event_rx: mpsc::UnboundedReceiver<SessionEvent>,
         closed: Option<String>,
         close_tx: oneshot::Sender<()>,
@@ -244,6 +244,249 @@ impl QuickForm {
     }
 }
 
+/// Quick-tunnels dialog state: ad-hoc forwards against a saved server or a
+/// temporary user@host, "this time only" or merged into the server's profile.
+struct QuickTunnelForm {
+    /// index into servers; == servers.len() means the temporary entry
+    sel: usize,
+    temp_host: String,
+    temp_port: String,
+    temp_user: String,
+    temp_password: String,
+    text: String,
+    error: Option<String>,
+}
+
+impl QuickTunnelForm {
+    fn new(servers_len: usize, sel: usize, prefill: Option<String>) -> Self {
+        Self {
+            sel: sel.min(servers_len),
+            temp_host: String::new(),
+            temp_port: "22".into(),
+            temp_user: "root".into(),
+            temp_password: String::new(),
+            text: prefill.unwrap_or_default(),
+            error: None,
+        }
+    }
+
+    fn build_temp_server(&self) -> Server {
+        let host = self.temp_host.trim().to_string();
+        Server {
+            name: format!("{host}:{}", self.temp_port.trim()),
+            host,
+            port: self.temp_port.trim().parse().unwrap_or(22),
+            username: self.temp_user.trim().to_string(),
+            auth: AuthMethod::Password,
+            password: self.temp_password.clone(),
+            key_path: String::new(),
+            key_passphrase: String::new(),
+            proxy: String::new(),
+            tunnels: Vec::new(),
+        }
+    }
+}
+
+/// One inline add-forward row (tunnels tab + popup share the layout)
+struct AddRowForm {
+    kind: char,
+    bind: String,
+    port: String,
+    host: String,
+    rport: String,
+    error: Option<String>,
+}
+
+impl AddRowForm {
+    fn new() -> Self {
+        Self {
+            kind: 'D',
+            bind: String::new(),
+            port: String::new(),
+            host: String::new(),
+            rport: String::new(),
+            error: None,
+        }
+    }
+
+    fn build(&self) -> Result<ForwardSpec, String> {
+        tunnel::spec_from_parts(self.kind, &self.bind, &self.port, &self.host, &self.rport)
+    }
+}
+
+/// Popup bound to one live session's forwards (terminal tab "Tunnels...")
+struct TunnelPopup {
+    title: String,
+    controller: tunnel::SharedController,
+    /// server for "save to profile" (None = temporary session)
+    server: Option<Server>,
+    add: Option<AddRowForm>,
+    actions: Vec<TunnelAction>,
+}
+
+/// UI intent collected by [`tunnel_panel_ui`], executed after the borrow ends.
+enum TunnelAction {
+    Add(tunnel::SharedController, ForwardSpec),
+    Remove(tunnel::SharedController, u64),
+    SaveServer(ForwardSpec),
+}
+
+/// True when the quick-tunnel temporary server has no usable host name.
+fn text_host_empty(temp: &Option<Server>) -> bool {
+    temp.as_ref().map(|srv| srv.host.trim().is_empty()).unwrap_or(true)
+}
+
+fn fmt_bytes(n: u64) -> String {
+    const KB: f64 = 1024.0;
+    const MB: f64 = 1024.0 * KB;
+    const GB: f64 = 1024.0 * MB;
+    let b = n as f64;
+    if b >= GB {
+        format!("{:.1} GB", b / GB)
+    } else if b >= MB {
+        format!("{:.1} MB", b / MB)
+    } else if b >= KB {
+        format!("{:.1} KB", b / KB)
+    } else {
+        format!("{n} B")
+    }
+}
+
+/// Shared renderer for live forwards of one session: the tunnels-only tab and
+/// the terminal-tab "Tunnels..." popup both use it. Collects intents into
+/// `actions` (the caller applies them once `self` is borrowable again).
+fn tunnel_panel_ui(
+    ui: &mut egui::Ui,
+    lang: Language,
+    id_prefix: &str,
+    ctrl: &tunnel::SharedController,
+    add: &mut Option<AddRowForm>,
+    save_server: Option<&Server>,
+    actions: &mut Vec<TunnelAction>,
+) {
+    let snaps = ctrl.list();
+    if snaps.is_empty() {
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new(tr(lang, "tnl_empty")).weak());
+        ui.add_space(8.0);
+    }
+    let rows_id = egui::Id::new(format!("{id_prefix}_tunnel_rows"));
+    let add_id = egui::Id::new(format!("{id_prefix}_tunnel_add_grid"));
+    egui::Grid::new(rows_id)
+        .num_columns(4)
+        .spacing([10.0, 4.0])
+        .show(ui, |ui| {
+            for sp in snaps {
+                ui.label(egui::RichText::new("\u{25cf}").color(egui::Color32::LIGHT_GREEN));
+                ui.label(egui::RichText::new(&sp.desc).monospace());
+                let stats = if sp.conns > 0 {
+                    format!(
+                        "{}  \u{2191}{} \u{2193}{}",
+                        tpl(tr(lang, "tnl_conns_n"), &[("n", &sp.conns.to_string())]),
+                        fmt_bytes(sp.up),
+                        fmt_bytes(sp.down)
+                    )
+                } else {
+                    tpl(tr(lang, "tnl_conns_n"), &[("n", "0")])
+                };
+                ui.label(egui::RichText::new(stats).weak().small());
+                ui.horizontal(|ui| {
+                    if save_server.is_some() {
+                        let spec = sp.spec.clone();
+                        if ui
+                            .small_button("\u{1f4be}")
+                            .on_hover_text(tr(lang, "qt_save"))
+                            .clicked()
+                        {
+                            actions.push(TunnelAction::SaveServer(spec));
+                        }
+                    }
+                    let id = sp.id;
+                    let c = ctrl.clone();
+                    if ui
+                        .small_button("\u{2715}")
+                        .on_hover_text(tr(lang, "tnl_remove_hint"))
+                        .clicked()
+                    {
+                        actions.push(TunnelAction::Remove(c, id));
+                    }
+                });
+                ui.end_row();
+            }
+        });
+    ui.add_space(6.0);
+    if add.is_none() && ui.button(tpl(tr(lang, "tnl_add"), &[])).clicked() {
+        *add = Some(AddRowForm::new());
+    }
+    if let Some(f) = add {
+        ui.separator();
+        egui::Grid::new(add_id)
+            .num_columns(2)
+            .spacing([8.0, 4.0])
+            .show(ui, |ui| {
+                ui.label(tr(lang, "tnl_kind"));
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut f.kind, 'D', "D SOCKS5");
+                    ui.selectable_value(&mut f.kind, 'L', tr(lang, "tnl_kind_l"));
+                    ui.selectable_value(&mut f.kind, 'R', tr(lang, "tnl_kind_r"));
+                });
+                ui.end_row();
+                ui.label(tr(lang, "tnl_bind"));
+                ui.horizontal(|ui| {
+                    ui.add(
+                        egui::TextEdit::singleline(&mut f.bind)
+                            .hint_text("127.0.0.1")
+                            .desired_width(110.0),
+                    );
+                    ui.label(egui::RichText::new(tr(lang, "tnl_bind_hint")).weak().small());
+                });
+                ui.end_row();
+                ui.label(tr(lang, "col_port"));
+                ui.add(egui::TextEdit::singleline(&mut f.port).desired_width(80.0));
+                ui.end_row();
+                if f.kind.eq_ignore_ascii_case(&'D') {
+                    ui.label(tr(lang, "tnl_target"));
+                    ui.label(egui::RichText::new(tr(lang, "tnl_target_d")).weak());
+                    ui.end_row();
+                } else {
+                    let label = if f.kind.eq_ignore_ascii_case(&'R') {
+                        tr(lang, "tnl_target_r")
+                    } else {
+                        tr(lang, "tnl_target_l")
+                    };
+                    ui.label(label);
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut f.host).desired_width(140.0));
+                        ui.label(":");
+                        ui.add(egui::TextEdit::singleline(&mut f.rport).desired_width(60.0));
+                    });
+                    ui.end_row();
+                }
+            });
+        if let Some(err) = &f.error {
+            ui.colored_label(egui::Color32::LIGHT_RED, err.clone());
+        }
+        let mut done = false;
+        ui.horizontal(|ui| {
+            if ui.button(tr(lang, "tnl_do_add")).clicked() {
+                match f.build() {
+                    Ok(spec) => {
+                        actions.push(TunnelAction::Add(ctrl.clone(), spec));
+                        done = true;
+                    }
+                    Err(e) => f.error = Some(e),
+                }
+            }
+            if ui.button(tr(lang, "btn_cancel")).clicked() {
+                done = true;
+            }
+        });
+        if done {
+            *add = None;
+        }
+    }
+}
+
 /// A pending connect-time question awaiting an answer (one dialog at a time)
 struct PendingQuestion {
     question: Question,
@@ -340,6 +583,16 @@ pub struct XxsshgApp {
     /// hotkey key-state edge detectors (true = currently held)
     hk_close_down: bool,
     hk_new_down: bool,
+    /// Quick-tunnels dialog (ad-hoc forwards, this-time-only or saved to server)
+    quick_tnl: Option<QuickTunnelForm>,
+    quick_tnl_open: bool,
+    /// Tunnel manager popup bound to one live session (terminal tab "Tunnels…")
+    tunnel_popup: Option<TunnelPopup>,
+    /// The one inline add-forward form of the tunnels tab (None = hidden)
+    tunnel_add_form: Option<AddRowForm>,
+    /// Async add/remove feedback from tunnel ops -> toasts
+    ctrl_fb_tx: mpsc::UnboundedSender<String>,
+    ctrl_fb_rx: mpsc::UnboundedReceiver<String>,
 }
 
 impl XxsshgApp {
@@ -352,6 +605,7 @@ impl XxsshgApp {
         settings: AppSettings,
         gcfg: GuiConfig,
     ) -> Self {
+        let (ctrl_fb_tx, ctrl_fb_rx) = mpsc::unbounded_channel();
         Self {
             rt,
             mono_fonts: fonts::available_monos(),
@@ -385,6 +639,12 @@ impl XxsshgApp {
             deferred_new_cmd: false,
             hk_close_down: false,
             hk_new_down: false,
+            quick_tnl: None,
+            quick_tnl_open: false,
+            tunnel_popup: None,
+            tunnel_add_form: None,
+            ctrl_fb_tx,
+            ctrl_fb_rx,
         }
     }
 
@@ -442,7 +702,7 @@ impl XxsshgApp {
     fn connect_server_tunnels(&mut self, idx: usize) {
         let Some(server) = self.servers.get(idx).cloned() else { return };
         match tunnel::parse_tunnel_list(&server.tunnels) {
-            Ok(f) if !f.is_empty() => self.spawn_tunnel_tab(server),
+            Ok(f) if !f.is_empty() => self.spawn_tunnel_tab(server, Some(f)),
             Ok(_) => self.toast(tr(self.lang(), "tnl_none").to_string()),
             Err(e) => self.toast(tpl(tr(self.lang(), "err_tunnel"), &[("e", &e)])),
         }
@@ -453,6 +713,73 @@ impl XxsshgApp {
     fn forwards_for(&self, server: &Server) -> Result<Vec<ForwardSpec>, String> {
         tunnel::parse_tunnel_list(&server.tunnels)
     }
+    /// Open the tunnel manager popup for one live session (terminal tab menu)
+    fn open_tunnel_popup(&mut self, idx: usize) {
+        let Some(Tab::Open { handle, server, name, .. }) = self.tabs.get(idx) else {
+            return;
+        };
+        let Some(ctrl) = handle.tunnel.clone() else {
+            return;
+        };
+        let title = tpl(tr(self.lang(), "tnl_title"), &[("name", name.as_str())]);
+        self.tunnel_popup = Some(TunnelPopup {
+            title,
+            controller: ctrl,
+            server: server.clone(),
+            add: None,
+            actions: Vec::new(),
+        });
+    }
+
+    /// Apply tunnel panel intents: async add/remove spawn on the runtime and
+    /// toast their result; "save" merges the rule into the server profile.
+    fn run_tunnel_actions(&mut self, actions: Vec<TunnelAction>, server: Option<Server>) {
+        let lang = self.lang();
+        for a in actions {
+            match a {
+                TunnelAction::Add(ctrl, spec) => self.ctrl_add(ctrl, spec, lang),
+                TunnelAction::Remove(ctrl, id) => self.ctrl_remove(ctrl, id, lang),
+                TunnelAction::SaveServer(spec) => {
+                    let Some(srv) = server.clone() else { continue };
+                    let entry = spec.to_entry();
+                    if let Some(pos) =
+                        self.servers.iter().position(|s| s.name == srv.name)
+                    {
+                        if !self.servers[pos].tunnels.contains(&entry) {
+                            self.servers[pos].tunnels.push(entry);
+                            self.persist_servers();
+                        }
+                    }
+                    self.toast(tpl(tr(lang, "tnl_saved"), &[("name", &srv.name)]));
+                }
+            }
+        }
+    }
+
+    /// Spawn an async add-forward; the outcome lands in the feedback channel.
+    fn ctrl_add(&self, ctrl: tunnel::SharedController, spec: ForwardSpec, lang: Language) {
+        let tx = self.ctrl_fb_tx.clone();
+        self.rt.spawn(async move {
+            let msg = match ctrl.add_forward(spec.clone()).await {
+                Ok(desc) => tpl(tr(lang, "tnl_added"), &[("line", &desc)]),
+                Err(e) => tpl(tr(lang, "tnl_op_fail"), &[("e", &e)]),
+            };
+            let _ = tx.send(msg);
+        });
+    }
+
+    /// Spawn an async remove-forward; the outcome lands in the feedback channel.
+    fn ctrl_remove(&self, ctrl: tunnel::SharedController, id: u64, lang: Language) {
+        let tx = self.ctrl_fb_tx.clone();
+        self.rt.spawn(async move {
+            let msg = match ctrl.remove_forward(id).await {
+                Ok(desc) => tpl(tr(lang, "tnl_removed"), &[("line", &desc)]),
+                Err(e) => tpl(tr(lang, "tnl_op_fail"), &[("e", &e)]),
+            };
+            let _ = tx.send(msg);
+        });
+    }
+
 
     /// resolve_opts + the headless-test TOFU override (same as spawn_connect_tab)
     fn base_opts(&self, server: &Server) -> ConnectOpts {
@@ -470,14 +797,33 @@ impl XxsshgApp {
         opts
     }
 
-    fn spawn_tunnel_tab(&mut self, server: Server) {
+    fn spawn_tunnel_tab(&mut self, server: Server, forwards: Option<Vec<ForwardSpec>>) {
+        let forwards = match forwards {
+            Some(f) if !f.is_empty() => f,
+            Some(_) => {
+                self.toast(tr(self.lang(), "tnl_none").to_string());
+                return;
+            }
+            None => match tunnel::parse_tunnel_list(&server.tunnels) {
+                Ok(f) if !f.is_empty() => f,
+                Ok(_) => {
+                    self.toast(tr(self.lang(), "tnl_none").to_string());
+                    return;
+                }
+                Err(e) => {
+                    self.toast(tpl(tr(self.lang(), "err_tunnel"), &[("e", &e)]));
+                    return;
+                }
+            },
+        };
         let opts = self.base_opts(&server);
         let name = tpl(tr(self.lang(), "tnl_tab"), &[("name", &server.name)]);
         let status = tpl(
             tr(self.lang(), "status_connecting"),
             &[("host", &server.host), ("port", &server.port.to_string())],
         );
-        let (result_rx, request_rx) = session::spawn_tunnels(&self.rt, server.clone(), opts);
+        let (result_rx, request_rx) =
+            session::spawn_tunnels(&self.rt, server.clone(), opts, forwards);
         self.tabs.push(Tab::TunnelConnecting {
             name,
             result_rx,
@@ -562,7 +908,7 @@ impl XxsshgApp {
                         &[("host", &server.host), ("port", &server.port.to_string())],
                     );
                     let (result_rx, request_rx) =
-                        session::spawn_tunnels(&self.rt, server.clone(), opts);
+                        session::spawn_tunnels(&self.rt, server.clone(), opts, f);
                     self.tabs[idx] = Tab::TunnelConnecting {
                         name,
                         result_rx,
@@ -1088,7 +1434,7 @@ impl XxsshgApp {
                     Ok(handle) => {
                         self.tabs[i] = Tab::Tunnels {
                             name,
-                            lines: handle.lines,
+                            controller: handle.controller,
                             event_rx: handle.event_rx,
                             closed: None,
                             close_tx: handle.close_tx,
@@ -1209,6 +1555,11 @@ impl XxsshgApp {
                 }
             }
         }
+
+        // 5. Async tunnel op results (add/remove from the panel/popup)
+        while let Ok(msg) = self.ctrl_fb_rx.try_recv() {
+            self.toast(msg);
+        }
     }
 
     // -- ui ------------------------------------------------------------------
@@ -1227,12 +1578,12 @@ impl XxsshgApp {
                     !self.servers.is_empty() && self.selected_server < self.servers.len();
                 ui.horizontal(|ui| {
                     let lang = self.lang();
-                    // Reserve fixed slots for the two square buttons (⚡ / ☰) plus
-                    // inter-item spacing, so the row can never overflow the panel
-                    // no matter what width is available.
+                    // Reserve fixed slots for the three square buttons (⚡ / ⛓ / ☰)
+                    // plus inter-item spacing, so the row can never overflow the
+                    // panel no matter what width is available.
                     let small_w = 26.0;
                     let spacing = ui.style().spacing.item_spacing.x;
-                    let conn_w = (ui.available_width() - 2.0 * small_w - 2.0 * spacing - 8.0).max(60.0);
+                    let conn_w = (ui.available_width() - 3.0 * small_w - 3.0 * spacing - 8.0).max(60.0);
                     ui.add_enabled_ui(can_connect, |ui| {
                         let connect_btn = ui.add_sized(
                             [conn_w, 26.0],
@@ -1251,6 +1602,17 @@ impl XxsshgApp {
                     if quick_btn.clicked() {
                         self.quick = Some(QuickForm::from_gcfg(&self.gcfg));
                         self.quick_open = true;
+                    }
+                    let tnl_btn = ui
+                        .add_sized([small_w, 26.0], egui::Button::new("\u{26d3}"))
+                        .on_hover_text(tpl(tr(lang, "qt_title"), &[]));
+                    if tnl_btn.clicked() {
+                        let sel = self
+                            .selected_server
+                            .min(self.servers.len().saturating_sub(1));
+                        self.quick_tnl =
+                            Some(QuickTunnelForm::new(self.servers.len(), sel, None));
+                        self.quick_tnl_open = true;
                     }
                     // 0.36: MenuButton renders its own button — size it via
                     // Button::min_size so it matches the lightning button
@@ -1433,6 +1795,16 @@ impl XxsshgApp {
                         self.open_sftp_for(i);
                         ui.close();
                     }
+                    if ui.button(tpl(tr(self.lang(), "menu_quick_tunnel"), &[])).clicked() {
+                        let pre = self.servers[i].tunnels.join("\n");
+                        self.quick_tnl = Some(QuickTunnelForm::new(
+                            self.servers.len(),
+                            i,
+                            Some(pre),
+                        ));
+                        self.quick_tnl_open = true;
+                        ui.close();
+                    }
                     let tunnels_item = ui.add_enabled(
                         !self.servers[i].tunnels.is_empty(),
                         egui::Button::new(tpl(tr(self.lang(), "menu_tunnels"), &[])),
@@ -1452,9 +1824,18 @@ impl XxsshgApp {
             let mut close: Option<usize> = None;
             let mut clear: Option<usize> = None;
             let mut reconnect: Option<usize> = None;
+            let mut open_tnl_popup: Option<usize> = None;
             for i in 0..self.tabs.len() {
                 let is_active = i == self.active_tab;
-                let title = self.tabs[i].name().to_string();
+                let mut title = self.tabs[i].name().to_string();
+                if let Tab::Open { handle, .. } = &self.tabs[i] {
+                    if let Some(ctrl) = &handle.tunnel {
+                        let n = ctrl.list().len();
+                        if n > 0 {
+                            title.push_str(&format!(" [T{n}]"));
+                        }
+                    }
+                }
                 let resp = ui.selectable_label(is_active, title);
                 if resp.clicked() {
                     activate = Some(i);
@@ -1466,6 +1847,14 @@ impl XxsshgApp {
                         && ui.button(tpl(tr(self.lang(), "btn_reconnect"), &[])).clicked()
                     {
                         reconnect = Some(i);
+                        ui.close();
+                    }
+                    let has_ctrl =
+                        matches!(&self.tabs[i], Tab::Open { handle, .. } if handle.tunnel.is_some());
+                    if has_ctrl
+                        && ui.button(tpl(tr(self.lang(), "menu_tunnels_manage"), &[])).clicked()
+                    {
+                        open_tnl_popup = Some(i);
                         ui.close();
                     }
                     if matches!(self.tabs[i], Tab::Open { .. })
@@ -1505,6 +1894,9 @@ impl XxsshgApp {
             if let Some(i) = reconnect {
                 self.reconnect_tab(i);
             }
+            if let Some(i) = open_tnl_popup {
+                self.open_tunnel_popup(i);
+            }
         });
         ui.separator();
     }
@@ -1530,6 +1922,7 @@ impl XxsshgApp {
         let mut do_reconnect = false;
         let mut do_close = false;
         let mut up_note: Option<String> = None;
+        let mut tunnel_actions: Vec<TunnelAction> = Vec::new();
         match &mut self.tabs[i] {
             Tab::Connecting { status, .. } => {
                 ui.centered_and_justified(|ui| {
@@ -1570,7 +1963,7 @@ impl XxsshgApp {
                     ui.spinner();
                 });
             }
-            Tab::Tunnels { lines, closed, server, .. } => {
+            Tab::Tunnels { controller, closed, server, .. } => {
                 if let Some(reason) = closed.clone() {
                     ui.centered_and_justified(|ui| {
                         ui.vertical_centered(|ui| {
@@ -1586,24 +1979,18 @@ impl XxsshgApp {
                         });
                     });
                 } else {
-                    ui.centered_and_justified(|ui| {
-                        ui.vertical_centered(|ui| {
-                            ui.add_space(48.0);
-                            ui.heading(tpl(tr(lang, "tnl_title"), &[("name", server.name.as_str())]));
-                            ui.add_space(12.0);
-                            for line in lines {
-                                ui.label(
-                                    egui::RichText::new(format!("● {line}"))
-                                        .color(egui::Color32::LIGHT_GREEN)
-                                        .monospace(),
-                                );
-                            }
-                            ui.add_space(12.0);
-                            ui.label(
-                                egui::RichText::new(tr(lang, "tnl_hint")).weak().small(),
-                            );
-                        });
-                    });
+                    ui.add_space(12.0);
+                    ui.heading(tpl(tr(lang, "tnl_title"), &[("name", server.name.as_str())]));
+                    ui.separator();
+                    tunnel_panel_ui(
+                        ui,
+                        lang,
+                        "tnl_tab",
+                        controller,
+                        &mut self.tunnel_add_form,
+                        Some(server),
+                        &mut tunnel_actions,
+                    );
                 }
             }
             Tab::Open { term, handle, resize_sent, closed, bell_flash, server, up, .. } => {
@@ -1736,6 +2123,13 @@ impl XxsshgApp {
             self.close_tab(i);
         } else if do_reconnect {
             self.reconnect_tab(i);
+        }
+        if !tunnel_actions.is_empty() {
+            let server = match self.tabs.get(i) {
+                Some(Tab::Tunnels { server, .. }) => Some(server.clone()),
+                _ => None,
+            };
+            self.run_tunnel_actions(tunnel_actions, server);
         }
         if let Some(note) = up_note {
             self.toast(note);
@@ -2204,6 +2598,216 @@ impl XxsshgApp {
             if cancel || !open {
                 self.quick = None;
                 self.quick_open = false;
+            }
+        }
+        // Quick-tunnels dialog (ad-hoc forwards; this-time-only or save to server)
+        if self.quick_tnl.is_some() {
+            let mut open = self.quick_tnl_open;
+            let mut once = false;
+            let mut save = false;
+            let mut cancel = false;
+            let lang = dlg_lang;
+            let n_servers = self.servers.len();
+            let win = egui::Window::new(tr(lang, "qt_title"))
+                .open(&mut open)
+                .collapsible(false)
+                .resizable(false);
+            win.show(ui, |ui| {
+                let qt = self.quick_tnl.as_mut().unwrap();
+                egui::Grid::new("quick_tnl_grid")
+                    .num_columns(2)
+                    .spacing([10.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label(tr(lang, "qt_server"));
+                        let sel_text = if qt.sel < n_servers {
+                            let srv = &self.servers[qt.sel];
+                            format!(
+                                "{} — {}@{}:{}",
+                                srv.name, srv.username, srv.host, srv.port
+                            )
+                        } else {
+                            tr(lang, "qt_temp").to_string()
+                        };
+                        egui::ComboBox::from_id_salt("quick_tnl_srv")
+                            .selected_text(sel_text)
+                            .show_ui(ui, |ui| {
+                                for (i, srv) in self.servers.iter().enumerate() {
+                                    let label = format!(
+                                        "{} — {}@{}:{}",
+                                        srv.name, srv.username, srv.host, srv.port
+                                    );
+                                    ui.selectable_value(&mut qt.sel, i, label);
+                                }
+                                ui.selectable_value(
+                                    &mut qt.sel,
+                                    n_servers,
+                                    tr(lang, "qt_temp"),
+                                );
+                            });
+                        ui.end_row();
+                        if qt.sel == n_servers {
+                            ui.label(tr(lang, "f_host"));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut qt.temp_host)
+                                    .hint_text("example.com")
+                                    .desired_width(220.0),
+                            );
+                            ui.end_row();
+                            ui.label(tr(lang, "f_port"));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut qt.temp_port)
+                                    .desired_width(80.0),
+                            );
+                            ui.end_row();
+                            ui.label(tr(lang, "f_user"));
+                            ui.text_edit_singleline(&mut qt.temp_user);
+                            ui.end_row();
+                            ui.label(tr(lang, "f_password"));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut qt.temp_password)
+                                    .password(true),
+                            );
+                            ui.end_row();
+                        }
+                        ui.label(tr(lang, "f_tunnels"));
+                        ui.add(
+                            egui::TextEdit::multiline(&mut qt.text)
+                                .hint_text(tr(lang, "f_tunnels_hint"))
+                                .desired_width(280.0),
+                        );
+                        ui.end_row();
+                    });
+                if let Some(err) = &qt.error {
+                    ui.colored_label(egui::Color32::LIGHT_RED, err.clone());
+                }
+                ui.add_space(4.0);
+                ui.horizontal(|ui| {
+                    if ui.button(tpl(tr(lang, "qt_once"), &[])).clicked() {
+                        once = true;
+                    }
+                    if ui
+                        .add_enabled(
+                            qt.sel < n_servers,
+                            egui::Button::new(tpl(tr(lang, "qt_save"), &[])),
+                        )
+                        .clicked()
+                    {
+                        save = true;
+                    }
+                    if ui.button(tr(lang, "btn_cancel")).clicked() {
+                        cancel = true;
+                    }
+                });
+            });
+            self.quick_tnl_open = open;
+            if once || save {
+                // pull the editable data out of self before mutating anything
+                let (text, sel, temp) = match self.quick_tnl.as_ref() {
+                    Some(qt) => (qt.text.clone(), qt.sel, Some(qt.build_temp_server())),
+                    None => (String::new(), 0, None),
+                };
+                let mut parsed: Vec<ForwardSpec> = Vec::new();
+                let mut bad: Option<String> = None;
+                for (n, line) in text.lines().enumerate() {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    match tunnel::parse_tunnel_entry(line) {
+                        Ok(f) => parsed.push(f),
+                        Err(e) => {
+                            bad = Some(tpl(
+                                tr(lang, "qt_line_err"),
+                                &[("n", &(n + 1).to_string()), ("e", &e)],
+                            ));
+                            break;
+                        }
+                    }
+                }
+                if parsed.is_empty() && bad.is_none() {
+                    bad = Some(tr(lang, "tnl_none").to_string());
+                }
+                if bad.is_none() && sel >= n_servers {
+                    // temporary target: a host is mandatory
+                    if text_host_empty(&temp) {
+                        bad = Some(tr(lang, "err_host_required").to_string());
+                    }
+                }
+                if let Some(err) = bad {
+                    if let Some(qt) = self.quick_tnl.as_mut() {
+                        qt.error = Some(err);
+                    }
+                } else {
+                    let mut server =
+                        if sel < n_servers { self.servers[sel].clone() } else { temp.unwrap() };
+                    if save && sel < n_servers {
+                        // merge (dedupe by parsed rule, not by string form)
+                        let mut existing =
+                            tunnel::parse_tunnel_list(&server.tunnels).unwrap_or_default();
+                        for f in &parsed {
+                            if !existing.contains(f) {
+                                existing.push(f.clone());
+                                server.tunnels.push(f.to_entry());
+                            }
+                        }
+                        if let Some(idx) =
+                            self.servers.iter().position(|srv| srv.name == server.name)
+                        {
+                            self.servers[idx] = server.clone();
+                        }
+                        self.persist_servers();
+                    }
+                    self.quick_tnl = None;
+                    self.quick_tnl_open = false;
+                    self.spawn_tunnel_tab(server, Some(parsed));
+                }
+            }
+            if cancel || !open {
+                self.quick_tnl = None;
+                self.quick_tnl_open = false;
+            }
+        }
+
+        // Tunnel manager popup (terminal tab "Tunnels..."): shared panel bound
+        // to one live session; close = hide only, the session keeps running.
+        if self.tunnel_popup.is_some() {
+            let mut close = false;
+            let lang = dlg_lang;
+            if let Some(tp) = &mut self.tunnel_popup {
+                let mut open = true;
+                egui::Window::new(tp.title.clone())
+                    .open(&mut open)
+                    .collapsible(false)
+                    .resizable(true)
+                    .default_width(560.0)
+                    .show(ui, |ui| {
+                        let mut acts: Vec<TunnelAction> = Vec::new();
+                        tunnel_panel_ui(
+                            ui,
+                            lang,
+                            "tnl_popup",
+                            &tp.controller,
+                            &mut tp.add,
+                            tp.server.as_ref(),
+                            &mut acts,
+                        );
+                        tp.actions.extend(acts);
+                    });
+                if !open {
+                    close = true;
+                }
+            }
+            let acts = self
+                .tunnel_popup
+                .as_mut()
+                .map(|tp| std::mem::take(&mut tp.actions))
+                .unwrap_or_default();
+            if !acts.is_empty() {
+                let server = self.tunnel_popup.as_ref().and_then(|tp| tp.server.clone());
+                self.run_tunnel_actions(acts, server);
+            }
+            if close {
+                self.tunnel_popup = None;
             }
         }
 

@@ -133,6 +133,10 @@ pub struct SessionHandle {
     pub event_rx: mpsc::UnboundedReceiver<SessionEvent>,
     /// Force-disconnect (equivalent of `~.`)
     pub close_tx: oneshot::Sender<()>,
+    /// Live tunnel manager of this session (add/remove/list forwards); None for
+    /// local shells. Present even when zero forwards are configured, so the UI
+    /// can add tunnels to a running terminal session on demand.
+    pub tunnel: Option<tunnel::SharedController>,
 }
 
 // ---------------------------------------------------------------------------
@@ -171,8 +175,9 @@ pub fn spawn_connect(
 /// Live tunnel-only session (no PTY): forwards up, connection held until the UI
 /// closes it (or the connection dies).
 pub struct TunnelHandle {
-    /// One "listening" line per forward, with the actual bound/assigned port.
-    pub lines: Vec<String>,
+    /// Live tunnel manager: the tab renders `controller.list()` (with stats) and
+    /// can add/remove forwards while the session is up.
+    pub controller: tunnel::SharedController,
     /// `Closed` when the connection drops or the user closes the tab.
     pub event_rx: mpsc::UnboundedReceiver<SessionEvent>,
     /// Close the tunnel session (disconnects).
@@ -186,6 +191,7 @@ pub fn spawn_tunnels(
     rt: &tokio::runtime::Handle,
     server: Server,
     opts: ConnectOpts,
+    forwards: Vec<tunnel::ForwardSpec>,
 ) -> (
     oneshot::Receiver<Result<TunnelHandle, ConnectError>>,
     mpsc::UnboundedReceiver<ConnectRequest>,
@@ -193,7 +199,7 @@ pub fn spawn_tunnels(
     let (result_tx, result_rx) = oneshot::channel();
     let (req_tx, req_rx) = mpsc::unbounded_channel();
     rt.spawn(async move {
-        let res = connect_tunnels_only(server, opts, req_tx).await;
+        let res = connect_tunnels_only(server, opts, req_tx, forwards).await;
         let _ = result_tx.send(res);
     });
     (result_rx, req_rx)
@@ -203,17 +209,18 @@ async fn connect_tunnels_only(
     server: Server,
     opts: ConnectOpts,
     requests: mpsc::UnboundedSender<ConnectRequest>,
+    forwards: Vec<tunnel::ForwardSpec>,
 ) -> Result<TunnelHandle, ConnectError> {
-    let forwards =
-        tunnel::parse_tunnel_list(&server.tunnels).map_err(ConnectError::Other)?;
     let remote = tunnel::new_remote_table();
     let (session, _last_disconnect) =
         establish(server.clone(), opts, requests, remote.clone()).await?;
     let shared: tunnel::SharedSession = Arc::new(tokio::sync::Mutex::new(session));
-    let mut set = tunnel::spawn_forwards(&shared, &forwards, &remote)
+    let controller: tunnel::SharedController =
+        Arc::new(tunnel::TunnelController::new(shared.clone(), remote));
+    let lines = controller
+        .start(&forwards)
         .await
         .map_err(ConnectError::Other)?;
-    let lines = std::mem::take(&mut set.lines);
 
     let (event_tx, event_rx) = mpsc::unbounded_channel::<SessionEvent>();
     let (close_tx, mut close_rx) = oneshot::channel::<()>();
@@ -225,7 +232,9 @@ async fn connect_tunnels_only(
         port,
         lines.join("; ")
     ));
+    let task_ctrl = Arc::clone(&controller);
     tokio::spawn(async move {
+        let controller = task_ctrl;
         let mut tick = tokio::time::interval(Duration::from_millis(500));
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut by_user = false;
@@ -242,7 +251,7 @@ async fn connect_tunnels_only(
                 }
             }
         }
-        set.abort();
+        controller.abort_all().await;
         let _ = shared
             .lock()
             .await
@@ -265,7 +274,7 @@ async fn connect_tunnels_only(
             },
         });
     });
-    Ok(TunnelHandle { lines, event_rx, close_tx })
+    Ok(TunnelHandle { controller, event_rx, close_tx })
 }
 
 /// Owned-data SOCKS5 connect so the boxed future is Send + 'static
@@ -293,41 +302,50 @@ async fn connect_and_open(
     let remote = tunnel::new_remote_table();
     let (session, last_disconnect) =
         establish(server.clone(), opts, requests, remote.clone()).await?;
-    open_pty_after_auth(session, &server, last_disconnect, cols, rows, forwards, remote).await
-}
-
-/// Authenticated session -> PTY + shell + endpoints for a GUI terminal tab.
-/// `forwards` (profile `tunnels`) are brought up first: a failure aborts the
-/// connect before the shell opens; on success a `ForwardsUp` event lists them.
-#[allow(clippy::too_many_arguments)]
-async fn open_pty_after_auth(
-    session: client::Handle<Handler>,
-    server: &Server,
-    last_disconnect: Arc<std::sync::Mutex<Option<String>>>,
-    cols: u16,
-    rows: u16,
-    forwards: Vec<tunnel::ForwardSpec>,
-    remote: tunnel::RemoteTable,
-) -> Result<SessionHandle, ConnectError> {
-    // Shared so tunnel tasks can open channels while the PTY pump runs.
     let shared: tunnel::SharedSession = Arc::new(tokio::sync::Mutex::new(session));
+    let controller: tunnel::SharedController =
+        Arc::new(tunnel::TunnelController::new(shared.clone(), remote));
     let mut forwards_lines: Option<Vec<String>> = None;
     if !forwards.is_empty() {
-        let mut set = tunnel::spawn_forwards(&shared, &forwards, &remote)
+        let lines = controller
+            .start(&forwards)
             .await
             .map_err(ConnectError::Other)?;
-        let lines = std::mem::take(&mut set.lines);
         crate::diag::log(&format!(
             "[{}:{}] forwards up alongside shell: {}",
             server.host,
             server.port,
             lines.join("; ")
         ));
-        // set is intentionally leaked: its listener tasks live until the
-        // session dies (close_tx -> disconnect tears the channel down).
-        std::mem::forget(set);
         forwards_lines = Some(lines);
     }
+    open_pty_after_auth(
+        shared,
+        &server,
+        last_disconnect,
+        cols,
+        rows,
+        forwards_lines,
+        controller,
+    )
+    .await
+}
+
+/// Authenticated session -> PTY + shell + endpoints for a GUI terminal tab.
+/// `forwards_lines` (profile `tunnels` already brought up by the caller) are
+/// announced via a `ForwardsUp` event once the endpoints exist. `controller`
+/// goes to the UI (badge / tunnels popup / add-forward) and is aborted by the
+/// pump task when the session ends, so no listener outlives the session.
+#[allow(clippy::too_many_arguments)]
+async fn open_pty_after_auth(
+    shared: tunnel::SharedSession,
+    server: &Server,
+    last_disconnect: Arc<std::sync::Mutex<Option<String>>>,
+    cols: u16,
+    rows: u16,
+    forwards_lines: Option<Vec<String>>,
+    controller: tunnel::SharedController,
+) -> Result<SessionHandle, ConnectError> {
     // Open channel + PTY + shell (PTY modes copied from xxssh)
     let mut channel = {
         let s = shared.lock().await;
@@ -357,6 +375,7 @@ async fn open_pty_after_auth(
     }
     let host = server.host.clone();
     let port = server.port;
+    let pump_ctrl = Arc::clone(&controller);
     tokio::spawn(async move {
         let started = std::time::Instant::now();
         let mut last_output = started;
@@ -472,6 +491,8 @@ async fn open_pty_after_auth(
             .await
             .disconnect(Disconnect::ByApplication, "session end", "en")
             .await;
+        // Session gone: free every tunnel listener it was carrying.
+        pump_ctrl.abort_all().await;
     });
 
     log::debug!("connect_and_open: shell open, handing endpoints to UI");
@@ -481,6 +502,7 @@ async fn open_pty_after_auth(
         output_rx,
         event_rx,
         close_tx,
+        tunnel: Some(controller),
     })
 }
 
@@ -900,9 +922,9 @@ impl client::Handler for Handler {
             .ok()
             .and_then(|t| t.get(&connected_port).cloned());
         match target {
-            Some((host, port)) => {
+            Some((host, port, stats)) => {
                 reply.accept().await;
-                tunnel::pump_forwarded_channel(channel, host, port);
+                tunnel::pump_forwarded_channel(channel, host, port, stats);
             }
             None => {
                 reply
