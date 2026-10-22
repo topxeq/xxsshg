@@ -103,6 +103,17 @@
 
 ---
 
+## 2026-10-22 v0.10.3：抓到真凶——take_failure() 每帧无条件重置状态机（10054 的真正根因）
+
+- upload-debug.log 显示：SFTP 通道每次都在 0.5s 内成功打开，但 connect_via_session 以 ~80ms 周期无限重发——状态机被反复清回 Idle
+- **真凶**：`TermUp::take_failure()` 每帧都被调用，实现是 `mem::replace(&mut self.state, UpState::Idle)` **无条件**覆盖——Ready/Connecting 全被清掉，拖拽 kick 看到 Idle 就再开一条通道（0.8.9 时代则是再开一条新 SSH 连接）
+- **改写认知**：最初的 os error 10054 根本不是"服务器限制第二条连接"，是我们自己的连接洪流（每几帧一条新连接）逼服务器 RST。via-session 重构仍是净收益（免二次认证等），但当时把根因归给服务器是错的
+- 修复：take_failure 加守卫——仅当状态真是 Failed 才重置（此时清 pending、返回错误文案），其余状态零操作
+- v0.10.3：vid=ver-1792632220156849，公网 latest=Windows GUI v0.10.3，已推送（191d81d）
+- **教训**：每帧轮询的 UI 代码里，任何"读改写"状态的操作必须带前置条件守卫；e2e 单次调用测不出每帧循环才暴露的 bug
+
+---
+
 ## 2026-10-22 v0.10.2：拖拽卡 Connecting 的可观测性与看门狗（用户实测中）
 
 - 用户实测 0.10.1：拖文件进 SSH 终端卡在 "opening upload channel on..." 徽标不动
