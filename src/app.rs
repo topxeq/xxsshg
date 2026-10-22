@@ -2081,11 +2081,12 @@ impl XxsshgApp {
                                 }
                             }
                             if up.is_ready() {
-                                let paths = std::mem::take(&mut up.pending);
                                 let host =
                                     server.as_ref().map(|s| s.host.as_str()).unwrap_or_default();
                                 match term.trusted_cwd(host) {
                                     Some(dir) => {
+                                        // commit: consume the drops now
+                                        let paths = std::mem::take(&mut up.pending);
                                         crate::diag::uplog(&format!(
                                             "cwd trusted: direct upload into {dir}"
                                         ));
@@ -2095,6 +2096,8 @@ impl XxsshgApp {
                                         up.upload_to(&self.rt, &dir, paths);
                                     }
                                     None if up.home_done => {
+                                        // commit: consume the drops now
+                                        let paths = std::mem::take(&mut up.pending);
                                         crate::diag::uplog(&format!(
                                             "cwd not trusted: opening remote picker (home={:?})",
                                             up.home
@@ -2102,10 +2105,14 @@ impl XxsshgApp {
                                         let anchor = up.home.clone();
                                         up.pick_open(&self.rt, paths, anchor);
                                     }
-                                    // home round-trip still in flight: hold the
-                                    // pending drops one more frame so the picker
-                                    // anchors at the real home, not "/"
-                                    None => {}
+                                    // home round-trip still in flight: leave the
+                                    // pending drops queued (retry next frame) so
+                                    // the picker anchors at the real home, not "/"
+                                    None => {
+                                        crate::diag::uplog(
+                                            "holding pending drops until home resolves",
+                                        );
+                                    }
                                 }
                             }
                         } else {
