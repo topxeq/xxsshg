@@ -103,6 +103,17 @@
 
 ---
 
+## 2026-10-22 v0.10.6：每个 profile 记住上次上传目录
+
+- 需求（用户定调）：不做 shell 集成注入；每个 profile 记住上次上传目录，选择框下次从那里开始，首次默认用户目录
+- 实现：GuiConfig 新增 `last_upload_dir: BTreeMap<"host:port", dir>`（gui.json，GUI 专用不污染共享的 servers.json）；选择框锚点优先级 = 记忆目录 → home → /；确认上传与 cwd 直传两条路径都会写入并保存
+- 本地 cmd/PS 页签不参与（无 profile 概念，锚 USERPROFILE）
+- vid=ver-1792634125b568e2，公网 latest=Windows GUI v0.10.6（sha 1c3b849c…，实下校验一致）；已推送
+- **重踩 0.5.6 的同版本重复坑**：重跑 publish 时脚本的已有版本复用检查没接住，产生了两个 0.10.6 条目——按 proc.md 记录的处置用 admin DELETE 按 vid 删掉旧条目（错哈希构建）恢复单条
+- **构建时序又错一次**：先 build 后 commit，嵌入哈希指向无功能代码的旧树——已重编重传纠正。两次低级失误同因：发版步骤没按 memory 流程逐步走，后续发版严格按 checklist 执行
+
+---
+
 ## 2026-10-22 v0.10.5：0.10.4 的 home 等待分支吞掉了第一次拖拽
 
 - 用户实测 0.10.4：第一次拖拽无反应，第二次才弹框（锚 /root 正确）
