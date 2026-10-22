@@ -209,6 +209,7 @@ R:0.0.0.0:80:localhost:3000"),
     // ---- terminal drag&drop upload ----
     ("drop_hint", "Release to upload", "松开以上传到当前目录", "鬆開以上傳到目前目錄"),
     ("up_connecting", "opening upload channel on {host}...", "正在建立 {host} 的上传通道...", "正在建立 {host} 的上傳通道..."),
+    ("up_timeout", "Upload channel timed out (30s) - try again", "上传通道超时（30 秒），请重试", "上傳通道超時（30 秒），請重試"),
     ("up_direct", "Upload to {dir}", "上传到 {dir}", "上傳到 {dir}"),
     ("up_copy_dir", "Copy to {dir}", "复制到 {dir}", "複製到 {dir}"),
     ("up_copy_ok", "Copy here", "复制到这里", "複製到這裡"),

@@ -662,6 +662,39 @@ impl XxsshgApp {
         self.status_msg = Some((msg, std::time::Instant::now()));
     }
 
+    /// Test hook (XXSSHG_SIM_DROP): enqueue a fake OS drop on the active tab
+    /// ~6s after startup, exactly like `dropped_files` handling does.
+    fn sim_drop(&mut self) {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        static DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+        let path = match std::env::var("XXSSHG_SIM_DROP") {
+            Err(e) => {
+                static ONCE: std::sync::Once = std::sync::Once::new();
+                ONCE.call_once(|| {
+                    crate::diag::log(&format!("sim drop: env missing ({e:?})"));
+                });
+                return;
+            }
+            Ok(p) if p.is_empty() => return,
+            Ok(p) => p,
+        };
+        let start = *START.get_or_init(std::time::Instant::now);
+        if DONE.load(std::sync::atomic::Ordering::Relaxed)
+            || start.elapsed() < std::time::Duration::from_secs(6)
+        {
+            return;
+        }
+        let i = self.active_tab.min(self.tabs.len().saturating_sub(1));
+        match self.tabs.get_mut(i) {
+            Some(Tab::Open { up, .. }) => {
+                DONE.store(true, std::sync::atomic::Ordering::Relaxed);
+                up.enqueue(vec![PathBuf::from(&path)]);
+                crate::diag::log(&format!("sim drop enqueued on tab {i}: {path}"));
+            }
+            _ => {} // no terminal tab yet: retry next frame
+        }
+    }
+
     // -- actions -----------------------------------------------------------
 
     /// click handler for the sort button, 3-state: name asc → desc → natural
@@ -2025,6 +2058,11 @@ impl XxsshgApp {
                             .collect()
                     });
                     if !dropped.is_empty() {
+                        crate::diag::uplog(&format!(
+                            "drop: {} file(s) on {} tab",
+                            dropped.len(),
+                            if server.is_some() { "SSH" } else { "local" }
+                        ));
                         up.enqueue(dropped);
                     }
                     up.update();
@@ -2048,12 +2086,18 @@ impl XxsshgApp {
                                     server.as_ref().map(|s| s.host.as_str()).unwrap_or_default();
                                 match term.trusted_cwd(host) {
                                     Some(dir) => {
+                                        crate::diag::uplog(&format!(
+                                            "cwd trusted: direct upload into {dir}"
+                                        ));
                                         let msg =
                                             tpl(tr(up.lang, "up_direct"), &[("dir", &dir)]);
                                         up.note(msg);
                                         up.upload_to(&self.rt, &dir, paths);
                                     }
                                     None => {
+                                        crate::diag::uplog(
+                                            "cwd not trusted: opening remote picker",
+                                        );
                                         let anchor = up.home.clone();
                                         up.pick_open(&self.rt, paths, anchor);
                                     }
@@ -2070,12 +2114,18 @@ impl XxsshgApp {
                             let host = local_hostname();
                             match term.trusted_cwd(&host) {
                                 Some(dir) if std::path::Path::new(&dir).is_dir() => {
+                                    crate::diag::uplog(&format!(
+                                        "cwd trusted + exists: direct copy into {dir}"
+                                    ));
                                     let msg =
                                         tpl(tr(up.lang, "up_copy_dir"), &[("dir", &dir)]);
                                     up.note(msg);
                                     up.upload_to(&self.rt, &dir, paths);
                                 }
                                 _ => {
+                                    crate::diag::uplog(
+                                        "cwd not trusted/missing: opening local picker",
+                                    );
                                     let anchor = dirs::home_dir();
                                     up.pick_open_local(&self.rt, paths, anchor);
                                 }
@@ -2944,6 +2994,10 @@ impl eframe::App for XxsshgApp {
                 }
             }
         }
+
+        // TEST HOOK: simulate a file drop on the active terminal tab (drag-drop
+        // cannot be driven from outside). XXSSHG_SIM_DROP=<local file path>
+        self.sim_drop();
 
         // Poll background session activity every frame; keep repainting while
         // any tab is live so output keeps flowing even without user input.

@@ -18,3 +18,18 @@ pub fn log(msg: &str) {
         let _ = f.write_all(line.as_bytes());
     }
 }
+
+/// Always-on trace of the drag-drop upload flow, at
+/// `~/.xxssh/upload-debug.log` (UTC). Low frequency: one drag is ~10 lines.
+pub fn uplog(msg: &str) {
+    let Ok(home) = dirs::home_dir().ok_or(()) else { return };
+    let path = home.join(".xxssh").join("upload-debug.log");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    let ts = crate::sftp::fmt_time_unix(now.as_secs());
+    let line = format!("{}.{:03} {}\n", ts.trim_end_matches(" UTC"), now.subsec_millis(), msg);
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = f.write_all(line.as_bytes());
+    }
+}

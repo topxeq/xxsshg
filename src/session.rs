@@ -436,6 +436,7 @@ async fn open_pty_after_auth(
                 }
                 // SFTP subsystem channel on the shared, authenticated session
                 r = sftp_req_rx.recv() => {
+                    crate::diag::uplog("pump: sftp request received");
                     if let Some(reply) = r {
                         let res = async {
                             let ch = {
@@ -444,15 +445,22 @@ async fn open_pty_after_auth(
                                     .await
                                     .map_err(|e| e.to_string())?
                             };
+                            crate::diag::uplog("pump: sftp channel open");
                             ch.request_subsystem(true, "sftp")
                                 .await
                                 .map_err(|e| e.to_string())?;
+                            crate::diag::uplog("pump: sftp subsystem set");
                             let sftp = russh_sftp::client::SftpSession::new(ch.into_stream())
                                 .await
                                 .map_err(|e| e.to_string())?;
+                            crate::diag::uplog("pump: sftp handshake done");
                             Ok(Arc::new(tokio::sync::Mutex::new(sftp)))
                         }
                         .await;
+                        crate::diag::uplog(&format!(
+                            "pump: sftp arm replying (ok={})",
+                            res.is_ok()
+                        ));
                         let _ = reply.send(res);
                     }
                 }
@@ -1426,5 +1434,90 @@ mod sftp_e2e_tests {
             Err(e) => panic!("list failed: {e}"),
         }
         drop(client);
+    }
+
+    /// SFTP subsystem channel on the EXISTING terminal session (the drag-drop
+    /// upload path): spawn the production session, then request the channel
+    /// through SessionHandle::sftp_req_tx exactly as the GUI does.
+    /// Gated: XXSSHG_SFTP_E2E=1 (+ optional XXSSHG_SFTP_E2E_HOST name/host)
+    #[test]
+    fn sftp_channel_on_session_e2e() {
+        if std::env::var("XXSSHG_SFTP_E2E").unwrap_or_default() != "1" {
+            return;
+        }
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .unwrap();
+        let servers = crate::xconfig::load(&crate::xconfig::default_config_path());
+        let want = std::env::var("XXSSHG_SFTP_E2E_HOST").unwrap_or_default();
+        let server = match servers.iter().find(|s| want.is_empty() || s.name == want || s.host == want) {
+            Some(s) => s.clone(),
+            None => panic!("no server matches {want:?}"),
+        };
+        let pw = server.password.clone();
+        let opts = ConnectOpts {
+            proxy: None,
+            connect_timeout: None,
+            known_hosts: None,
+            known_hosts_add: None,
+            host_keystore: dirs::home_dir().map(|h| {
+                h.join(".xxssh").join("known_hosts").to_string_lossy().into_owned()
+            }),
+        };
+        let (result_rx, mut request_rx) =
+            spawn_connect(&rt.handle().clone(), server, opts, 100, 24, Vec::new());
+        let mut handle = match rt.block_on(async {
+            tokio::time::timeout(Duration::from_secs(30), result_rx).await
+        }) {
+            Ok(Ok(Ok(h))) => h,
+            Ok(Ok(Err(e))) => panic!("connect error: {e:?}"),
+            Ok(Err(_)) => panic!("result channel dropped (task panic?)"),
+            Err(_) => panic!("connect timed out"),
+        };
+        // answer connect-time prompts (stored password) like the GUI does
+        rt.spawn(async move {
+            while let Some(req) = request_rx.recv().await {
+                match req {
+                    ConnectRequest::Password { respond, .. } => {
+                        let _ = respond.send(Some(pw.clone()));
+                    }
+                    ConnectRequest::HostKey { respond, .. } => {
+                        let _ = respond.send(true);
+                    }
+                    ConnectRequest::Passphrase { respond, .. } => {
+                        let _ = respond.send(None);
+                    }
+                }
+            }
+        });
+        // drain PTY output so the session flows
+        let mut out_rx = handle.output_rx;
+        rt.spawn(async move { while out_rx.recv().await.is_some() {} });
+
+        let (reply_tx, reply_rx) = oneshot::channel();
+        handle
+            .sftp_req_tx
+            .send(reply_tx)
+            .expect("send sftp request");
+        let reply = rt.block_on(async {
+            tokio::time::timeout(Duration::from_secs(20), reply_rx).await
+        });
+        let res = match reply {
+            Err(_) => panic!("SFTP channel request TIMED OUT - pump arm never replied (reproduces the hang)"),
+            Ok(Err(_)) => panic!("reply channel dropped (session died?)"),
+            Ok(Ok(r)) => r,
+        };
+        let sftp = res.expect("sftp channel open failed");
+        let home = rt.block_on(async {
+            let g = sftp.lock().await;
+            g.canonicalize(".").await
+        });
+        match home {
+            Ok(h) => println!("sftp channel OK, home={h}"),
+            Err(e) => panic!("canonicalize failed: {e}"),
+        }
+        let _ = handle.close_tx.send(());
     }
 }

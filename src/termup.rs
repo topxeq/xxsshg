@@ -29,6 +29,7 @@ pub enum UpState {
     Idle,
     Connecting {
         status: String,
+        started: std::time::Instant,
         result_rx: oneshot::Receiver<Result<Arc<tokio::sync::Mutex<SftpSession>>, String>>,
     },
     Ready,
@@ -150,7 +151,23 @@ impl TermUp {
 
     /// Queue dropped items; consumed once the SFTP channel is ready.
     pub fn enqueue(&mut self, paths: Vec<PathBuf>) {
+        crate::diag::uplog(&format!(
+            "enqueue: {} item(s) (state={}, pending now {})",
+            paths.len(),
+            self.state_name(),
+            self.pending.len() + paths.len()
+        ));
         self.pending.extend(paths);
+    }
+
+    /// Short state label for tracing
+    pub fn state_name(&self) -> &'static str {
+        match self.state {
+            UpState::Idle => "Idle",
+            UpState::Connecting { .. } => "Connecting",
+            UpState::Ready => "Ready",
+            UpState::Failed(_) => "Failed",
+        }
     }
 
     /// Open the lazy SFTP subsystem channel on the tab's existing SSH
@@ -160,9 +177,12 @@ impl TermUp {
             return;
         }
         let (result_tx, result_rx) = oneshot::channel();
-        let _ = handle.sftp_req_tx.send(result_tx);
+        let sent = handle.sftp_req_tx.send(result_tx);
+        crate::diag::uplog(&format!(
+            "connect_via_session: request sent to session task (send_err={})", sent.is_err()
+        ));
         let status = tpl(tr(self.lang, "up_connecting"), &[("host", host)]);
-        self.state = UpState::Connecting { status, result_rx };
+        self.state = UpState::Connecting { status, started: std::time::Instant::now(), result_rx };
     }
 
     /// Polled connect result (None while still in flight)
@@ -176,6 +196,11 @@ impl TermUp {
 
     /// Apply a finished connect result (polled by the app each frame)
     pub fn on_connect_result(&mut self, rt: &tokio::runtime::Handle, res: Result<Arc<tokio::sync::Mutex<SftpSession>>, String>) {
+        crate::diag::uplog(&format!(
+            "on_connect_result: {}{}",
+            if res.is_ok() { "Ready" } else { "Failed" },
+            res.as_ref().err().map(|e| format!(" ({e})")).unwrap_or_default()
+        ));
         match res {
             Ok(sftp) => {
                 self.sftp = Some(sftp);
@@ -242,6 +267,15 @@ impl TermUp {
                 (Some(e), _) => self.note(format!("✗ {name}: {e}")),
             }
         }
+        // watchdog: a channel request that never completes must not hang the
+        // badge forever. Fail visibly; the next drop retries from Idle.
+        if let UpState::Connecting { started, .. } = &self.state {
+            if started.elapsed() > std::time::Duration::from_secs(30) {
+                crate::diag::uplog("watchdog: Connecting exceeded 30s -> Failed (retryable)");
+                self.state = UpState::Failed(tr(self.lang, "up_timeout").to_string());
+                self.pending.clear();
+            }
+        }
         // one conflict dialog at a time; the rest queue up
         if self.transfer_ask.is_none() {
             if let Ok(q) = self.ask_rx.try_recv() {
@@ -266,6 +300,12 @@ impl TermUp {
     /// item's own name is appended (same semantics as the SFTP tab's
     /// upload_path). Routes to the SFTP engine or the local copy engine.
     pub fn upload_to(&mut self, rt: &tokio::runtime::Handle, dir: &str, paths: Vec<PathBuf>) {
+        crate::diag::uplog(&format!(
+            "upload_to: {} item(s) into {:?} ({})",
+            paths.len(),
+            dir,
+            if self.local { "local copy" } else { "sftp" }
+        ));
         if self.local {
             self.upload_local(rt, dir, paths);
         } else {
@@ -383,6 +423,11 @@ impl TermUp {
 
     /// Open the picker for `paths`, anchored at `anchor` (remote home)
     pub fn pick_open(&mut self, rt: &tokio::runtime::Handle, paths: Vec<PathBuf>, anchor: Option<String>) {
+        crate::diag::uplog(&format!(
+            "pick_open (remote): {} item(s), anchor={:?}",
+            paths.len(),
+            anchor
+        ));
         let dir = anchor.unwrap_or_else(|| "/".into());
         self.pick = Some(DirPick {
             paths,
@@ -402,6 +447,11 @@ impl TermUp {
 
     /// Open the LOCAL picker, anchored at the user's home directory
     pub fn pick_open_local(&mut self, rt: &tokio::runtime::Handle, paths: Vec<PathBuf>, anchor: Option<PathBuf>) {
+        crate::diag::uplog(&format!(
+            "pick_open_local: {} item(s), anchor={:?}",
+            paths.len(),
+            anchor
+        ));
         let dir = anchor
             .map(|p| p.to_string_lossy().into_owned())
             .unwrap_or_else(|| "C:\\".into());
@@ -579,6 +629,10 @@ impl TermUp {
                 match rx.try_recv() {
                     Ok(PickMsg::Exists(dir)) => {
                         pick.busy = false;
+                        crate::diag::uplog(&format!(
+                            "pick confirmed: {} item(s) into {dir}",
+                            pick.paths.len()
+                        ));
                         out = Some((dir, std::mem::take(&mut pick.paths)));
                     }
                     Ok(PickMsg::NeedCreate(dir)) => {
@@ -728,6 +782,7 @@ impl TermUp {
     /// Drop the SFTP channel with the tab (the channel closes when the last
     /// Arc lands — in-flight upload tasks keep it alive until they finish)
     pub fn shutdown(&mut self) {
+        crate::diag::uplog("shutdown: tab closing, upload channel dropped");
         self.sftp = None;
         self.state = UpState::Idle;
         self.pending.clear();
