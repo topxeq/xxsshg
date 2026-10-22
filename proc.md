@@ -103,6 +103,16 @@
 
 ---
 
+## 2026-10-22 v0.10.2：拖拽卡 Connecting 的可观测性与看门狗（用户实测中）
+
+- 用户实测 0.10.1：拖文件进 SSH 终端卡在 "opening upload channel on..." 徽标不动
+- 排查：via-session 通道对同一台 xhw 服务器的 e2e 0.54s 通过（生产 spawn_connect 全链路），静态审查无异常；GUI 后台自动化复现失败（会话无法创建窗口，且两次拉起的实例已清理——注意 taskkill //PID 需要的是 Windows PID 而非 MSYS job pid）
+- 处置：① diag.rs 新增 `uplog` —— 上传链路专用无条件日志 `~/.xxssh/upload-debug.log`（一次拖拽约 10 行：drop/enqueue/connect_via_session/pump 各阶段/on_connect_result/trusted 判定/picker/确认/watchdog/shutdown）；② Connecting 状态加 30 秒看门狗：超时转 Failed（"上传通道超时（30 秒），请重试"）并保留 pending 丢弃、下次拖拽自动重试，任何环境的静默悬挂都变成可见可重试的错误
+- vid=ver-1792631491909f05，sha256 ec2db4f0…，公网 latest=Windows GUI v0.10.2，实下 sha 一致、输出 `v0.10.2 (9f792fc)`；已推送
+- 等待用户复现后读 upload-debug.log 定位具体卡点
+
+---
+
 ## 2026-10-22 发布纠错：10054 修复以 v0.10.1 发布（0.8.9/0.8.10 为错位版本号）
 
 - **事故**：另一会话 10-17 已把版本线推到 v0.10.0（隧道管理，24224e2），本会话按陈旧记忆从 0.8.8 升版，连续发出 0.8.9、0.8.10 两个"内容含 0.10.0 全部代码但版本号更低"的错位版本，且 0.8.10 的 cleanup 删掉了服务器上的 0.10.0 条目——升级器按版本比较，装了 0.10.0 的用户永远不会"降级"到 0.8.10
