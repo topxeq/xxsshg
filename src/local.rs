@@ -11,6 +11,7 @@ use tokio::sync::mpsc;
 
 use crate::session::{SessionEvent, SessionHandle};
 
+#[cfg(test)]
 /// Base64 of UTF-16LE — the payload format PowerShell's `-EncodedCommand`
 /// expects. Hand-rolled (no base64 crate): 3 bytes -> 4 chars, std alphabet.
 fn b64_utf16le(s: &str) -> String {
@@ -187,12 +188,15 @@ pub fn spawn(
         }
     });
 
+    // Local shells never serve SFTP-over-session requests: park the receiver
+    let (sftp_req_tx, _sftp_req_rx) = tokio::sync::mpsc::unbounded_channel();
     Ok(SessionHandle {
         input_tx,
         resize_tx,
         output_rx,
         event_rx,
         close_tx,
+        sftp_req_tx,
         tunnel: None,
     })
 }

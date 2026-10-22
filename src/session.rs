@@ -133,11 +133,20 @@ pub struct SessionHandle {
     pub event_rx: mpsc::UnboundedReceiver<SessionEvent>,
     /// Force-disconnect (equivalent of `~.`)
     pub close_tx: oneshot::Sender<()>,
+    /// Ask the session task for an SFTP subsystem channel on THIS already
+    /// authenticated connection. Avoids a second TCP connection + re-auth
+    /// (servers with MaxStartups / PerSourcePenalties or restrictive proxies
+    /// reset such extra connections: os error 10054).
+    pub sftp_req_tx: mpsc::UnboundedSender<SftpChannelReply>,
     /// Live tunnel manager of this session (add/remove/list forwards); None for
     /// local shells. Present even when zero forwards are configured, so the UI
     /// can add tunnels to a running terminal session on demand.
     pub tunnel: Option<tunnel::SharedController>,
 }
+
+/// Reply for `SessionHandle::sftp_req_tx`
+pub type SftpChannelReply =
+    oneshot::Sender<Result<Arc<tokio::sync::Mutex<russh_sftp::client::SftpSession>>, String>>;
 
 // ---------------------------------------------------------------------------
 // Spawn entry point
@@ -369,6 +378,7 @@ async fn open_pty_after_auth(
     let (output_tx, output_rx) = mpsc::unbounded_channel::<Vec<u8>>();
     let (event_tx, event_rx) = mpsc::unbounded_channel::<SessionEvent>();
     let (close_tx, mut close_rx) = oneshot::channel::<()>();
+    let (sftp_req_tx, mut sftp_req_rx) = mpsc::unbounded_channel::<SftpChannelReply>();
 
     if let Some(lines) = forwards_lines {
         let _ = event_tx.send(SessionEvent::ForwardsUp(lines));
@@ -422,6 +432,28 @@ async fn open_pty_after_auth(
                 r = resize_rx.recv() => {
                     if let Some((cols, rows)) = r {
                         let _ = channel.window_change(cols as u32, rows as u32, 0, 0).await;
+                    }
+                }
+                // SFTP subsystem channel on the shared, authenticated session
+                r = sftp_req_rx.recv() => {
+                    if let Some(reply) = r {
+                        let res = async {
+                            let ch = {
+                                let s = shared.lock().await;
+                                s.channel_open_session()
+                                    .await
+                                    .map_err(|e| e.to_string())?
+                            };
+                            ch.request_subsystem(true, "sftp")
+                                .await
+                                .map_err(|e| e.to_string())?;
+                            let sftp = russh_sftp::client::SftpSession::new(ch.into_stream())
+                                .await
+                                .map_err(|e| e.to_string())?;
+                            Ok(Arc::new(tokio::sync::Mutex::new(sftp)))
+                        }
+                        .await;
+                        let _ = reply.send(res);
                     }
                 }
                 // forced close
@@ -502,6 +534,7 @@ async fn open_pty_after_auth(
         output_rx,
         event_rx,
         close_tx,
+        sftp_req_tx,
         tunnel: Some(controller),
     })
 }

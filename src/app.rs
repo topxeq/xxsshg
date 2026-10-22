@@ -1338,29 +1338,6 @@ impl XxsshgApp {
             }
         }
 
-        // 1c. terminal-tab upload channel: auth questions while connecting
-        for i in 0..self.tabs.len() {
-            if let Tab::Open { up, .. } = &mut self.tabs[i] {
-                if self.question.is_none() {
-                    if let Some(req) = up.poll_request() {
-                        self.question = Some(PendingQuestion {
-                            question: match req {
-                                ConnectRequest::Password { user, host, respond } => {
-                                    Question::Password { user, host, respond: Some(respond), input: String::new() }
-                                }
-                                ConnectRequest::Passphrase { path, respond } => {
-                                    Question::Passphrase { path, respond: Some(respond), input: String::new() }
-                                }
-                                ConnectRequest::HostKey { host, port, fingerprint, changed, respond } => {
-                                    Question::HostKey { host, port, fingerprint, changed, respond: Some(respond) }
-                                }
-                            },
-                        });
-                    }
-                }
-            }
-        }
-
         // 2. Connect results
         let mut connect_results: Vec<(usize, String, Result<SessionHandle, ConnectError>, bool, Server)> =
             Vec::new();
@@ -2057,11 +2034,12 @@ impl XxsshgApp {
                     if !up.pending.is_empty() && up.pick.is_none() {
                         if server.is_some() {
                             // drops waiting + no channel yet: open it lazily
-                            // (auth questions use the shared question dialog)
+                            // as a subsystem channel on THIS tab's SSH
+                            // connection (no second connection -> nothing to
+                            // authenticate, immune to connection limits)
                             if matches!(up.state, UpState::Idle) {
                                 if let Some(srv) = server {
-                                    let opts = resolve_opts(srv, &self.settings);
-                                    up.connect(&self.rt, srv.clone(), opts);
+                                    up.connect_via_session(handle, &srv.host);
                                 }
                             }
                             if up.is_ready() {

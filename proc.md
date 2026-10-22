@@ -103,6 +103,16 @@
 
 ---
 
+## 2026-10-14 修复（GUI）0.8.10：拖拽上传改走现有 SSH 连接的子系统通道（os error 10054）
+
+- 用户实测：拖文件进 SSH 终端（Ubuntu），懒加载 SFTP 的新建第二条 TCP 连接被远端强制断开（os error 10054）——sshd PerSourcePenalties/MaxStartups、代理或防火墙对并发新连接的限制都会这样杀
+- 架构修正：**不再开第二条连接**。SessionHandle 新增 sftp_req_tx，会话 pump 任务加 select 分支：收到请求后在 shared 已认证会话上 `channel_open_session` + `request_subsystem("sftp")` + SftpSession::new，回传 Arc<Mutex<SftpSession>>；TermUp::connect_via_session 替代 spawn_sftp 路径，UpState::Connecting 不再携带 ConnectRequest（复用已认证会话 = 无二次认证/密码弹窗），poll_tabs 的 1c 认证轮询随之删除
+- 生命周期：频道随最后一个 Arc 落地自动关闭（在途上传任务持有 Arc 直到完成）；Tab 关闭 shutdown 置 None 即可；本地下 shells 的 SessionHandle 填 parking channel
+- spawn_sftp/SftpClient 保留（SFTP 文件页签仍是独立连接模型，未报问题不动）
+- 63 测试全过
+
+---
+
 ## 2026-10-14 勘误（GUI）："PSReadLine 回车失效"是假警报，未修、无需发版
 
 - 0.8.9 发布记录里的"遗留观察项"（ConPTY 重新开启 win32-input-mode 导致 PowerShell 回车失效）经对照实验**证伪**：生产代码路径（Terminal 模型经 EventProxy 自动应答 CPR）下，PowerShell 的裸回车直接可用——探针测试 `exit

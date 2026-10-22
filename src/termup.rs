@@ -1,7 +1,9 @@
 //! Drag & drop upload for terminal tabs.
 //!
 //! A terminal tab has no SFTP channel of its own; on the first drop one is
-//! opened lazily (`spawn_sftp`, same auth/proxy flow as the SFTP tab). The
+//! opened lazily as a subsystem channel on the tab's EXISTING SSH connection
+//! (no second TCP connection, no re-auth: servers with connection limits or
+//! per-source penalties reset extra connections with os error 10054). The
 //! upload target is the terminal's current directory ONLY when the shell
 //! reported it via OSC 7 and the report passes the trust checks in
 //! `Terminal::trusted_cwd`; otherwise a remote directory picker dialog
@@ -20,16 +22,14 @@ use tokio::sync::{mpsc, oneshot};
 use crate::i18n::{tpl, tr, Language};
 use crate::sftp::{self, FileEntry};
 use crate::sftpui::{Transfer, TransferKind};
-use crate::session::{spawn_sftp, ConnectError, ConnectOpts, ConnectRequest, SftpClient};
-use crate::xconfig::Server;
+use crate::session::SessionHandle;
 
 /// Connection state of the terminal tab's lazy SFTP channel
 pub enum UpState {
     Idle,
     Connecting {
         status: String,
-        result_rx: oneshot::Receiver<Result<SftpClient, ConnectError>>,
-        request_rx: mpsc::UnboundedReceiver<ConnectRequest>,
+        result_rx: oneshot::Receiver<Result<Arc<tokio::sync::Mutex<SftpSession>>, String>>,
     },
     Ready,
     Failed(String),
@@ -73,7 +73,6 @@ pub struct TermUp {
     pub local: bool,
     pub state: UpState,
     pub sftp: Option<Arc<tokio::sync::Mutex<SftpSession>>>,
-    pub close_tx: Option<oneshot::Sender<()>>,
     /// remote user's home directory (canonicalize "."), when resolved
     pub home: Option<String>,
     home_rx: Option<oneshot::Receiver<Option<String>>>,
@@ -105,7 +104,6 @@ impl TermUp {
             // local tabs copy directly: the channel is always "ready"
             state: if local { UpState::Ready } else { UpState::Idle },
             sftp: None,
-            close_tx: None,
             home: None,
             home_rx: None,
             pending: Vec::new(),
@@ -155,26 +153,20 @@ impl TermUp {
         self.pending.extend(paths);
     }
 
-    /// Open the lazy SFTP channel (no-op while already connecting/ready)
-    pub fn connect(&mut self, rt: &tokio::runtime::Handle, server: Server, opts: ConnectOpts) {
+    /// Open the lazy SFTP subsystem channel on the tab's existing SSH
+    /// connection (no-op while already connecting/ready)
+    pub fn connect_via_session(&mut self, handle: &SessionHandle, host: &str) {
         if !matches!(self.state, UpState::Idle | UpState::Failed(_)) {
             return;
         }
-        let status = tpl(tr(self.lang, "up_connecting"), &[("host", &server.host)]);
-        let (result_rx, request_rx) = spawn_sftp(rt, server, opts);
-        self.state = UpState::Connecting { status, result_rx, request_rx };
-    }
-
-    pub fn poll_request(&mut self) -> Option<ConnectRequest> {
-        if let UpState::Connecting { request_rx, .. } = &mut self.state {
-            request_rx.try_recv().ok()
-        } else {
-            None
-        }
+        let (result_tx, result_rx) = oneshot::channel();
+        let _ = handle.sftp_req_tx.send(result_tx);
+        let status = tpl(tr(self.lang, "up_connecting"), &[("host", host)]);
+        self.state = UpState::Connecting { status, result_rx };
     }
 
     /// Polled connect result (None while still in flight)
-    pub fn poll_result(&mut self) -> Option<Result<SftpClient, ConnectError>> {
+    pub fn poll_result(&mut self) -> Option<Result<Arc<tokio::sync::Mutex<SftpSession>>, String>> {
         if let UpState::Connecting { result_rx, .. } = &mut self.state {
             result_rx.try_recv().ok()
         } else {
@@ -183,11 +175,10 @@ impl TermUp {
     }
 
     /// Apply a finished connect result (polled by the app each frame)
-    pub fn on_connect_result(&mut self, rt: &tokio::runtime::Handle, res: Result<SftpClient, ConnectError>) {
+    pub fn on_connect_result(&mut self, rt: &tokio::runtime::Handle, res: Result<Arc<tokio::sync::Mutex<SftpSession>>, String>) {
         match res {
-            Ok(client) => {
-                self.sftp = Some(client.sftp);
-                self.close_tx = Some(client.close_tx);
+            Ok(sftp) => {
+                self.sftp = Some(sftp);
                 self.state = UpState::Ready;
                 // resolve the user's home directory in the background (the
                 // picker anchors there; canonicalize "." is the server's own
@@ -205,7 +196,7 @@ impl TermUp {
                 }
             }
             Err(e) => {
-                self.state = UpState::Failed(e.message(self.lang));
+                self.state = UpState::Failed(e);
             }
         }
     }
@@ -734,11 +725,10 @@ impl TermUp {
         self.transfers.iter().filter(|t| !t.finished)
     }
 
-    /// Drop the SFTP connection with the tab
+    /// Drop the SFTP channel with the tab (the channel closes when the last
+    /// Arc lands — in-flight upload tasks keep it alive until they finish)
     pub fn shutdown(&mut self) {
-        if let Some(tx) = self.close_tx.take() {
-            let _ = tx.send(());
-        }
+        self.sftp = None;
         self.state = UpState::Idle;
         self.pending.clear();
         self.pick = None;
