@@ -63,6 +63,11 @@ pub struct DirPick {
     /// OK hit on a non-existing dir: show the create-and-upload confirm
     pub confirm_create: bool,
     pub create_dir: String,
+    /// new-folder prompt visible + typed name
+    pub new_dir_prompt: bool,
+    pub new_dir_name: String,
+    new_dir_focus_done: bool,
+    mk_rx: Option<mpsc::UnboundedReceiver<Result<String, String>>>,
     list_rx: Option<mpsc::UnboundedReceiver<Result<(String, Vec<FileEntry>), String>>>,
     ok_rx: Option<mpsc::UnboundedReceiver<PickMsg>>,
 }
@@ -456,6 +461,10 @@ impl TermUp {
             busy: false,
             confirm_create: false,
             create_dir: String::new(),
+            new_dir_prompt: false,
+            new_dir_name: String::new(),
+            new_dir_focus_done: false,
+            mk_rx: None,
             list_rx: None,
             ok_rx: None,
         });
@@ -482,6 +491,10 @@ impl TermUp {
             busy: false,
             confirm_create: false,
             create_dir: String::new(),
+            new_dir_prompt: false,
+            new_dir_name: String::new(),
+            new_dir_focus_done: false,
+            mk_rx: None,
             list_rx: None,
             ok_rx: None,
         });
@@ -688,6 +701,8 @@ impl TermUp {
         let mut ok = false;
         let mut cancel = false;
         let mut create = false;
+        let mut mk_start = false;
+        let mut mk_cancel = false;
         let mut open = true;
         egui::Window::new(tpl(tr(lang, if is_local { "up_pick_title_copy" } else { "up_pick_title" }), &[]))
             .id(egui::Id::new("termup_pick_win"))
@@ -757,11 +772,47 @@ impl TermUp {
                 if let Some(err) = &pick.error {
                     ui.colored_label(egui::Color32::LIGHT_RED, err.clone());
                 }
-                ui.add_space(6.0);
+                // new-folder prompt: create inside the currently browsed dir
+                if pick.new_dir_prompt {
+                    ui.separator();
+                    ui.horizontal(|ui| {
+                        ui.label(tpl(tr(lang, "sftp_new_name"), &[]));
+                        let fe = ui.add(
+                            egui::TextEdit::singleline(&mut pick.new_dir_name)
+                                .desired_width(180.0)
+                                .hint_text(tpl(tr(lang, "sftp_new_dir"), &[])),
+                        );
+                        if !pick.new_dir_focus_done {
+                            fe.request_focus();
+                            pick.new_dir_focus_done = true;
+                        }
+                        let enter =
+                            fe.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        if enter
+                            || ui
+                                .add(egui::Button::new(tpl(tr(lang, "up_mk_create"), &[])))
+                                .clicked()
+                        {
+                            mk_start = true;
+                        }
+                        if ui.button(tpl(tr(lang, "up_cancel"), &[])).clicked() {
+                            mk_cancel = true;
+                        }
+                    });
+                }
+                ui.add_space(4.0);
                 ui.separator();
                 ui.horizontal(|ui| {
                     if ui.button(tpl(tr(lang, "up_cancel"), &[])).clicked() {
                         cancel = true;
+                    }
+                    if ui
+                        .button(tpl(tr(lang, "sftp_new_dir"), &[]))
+                        .clicked()
+                    {
+                        pick.new_dir_prompt = true;
+                        pick.new_dir_name.clear();
+                        pick.new_dir_focus_done = false;
                     }
                     if pick.busy {
                         ui.spinner();
@@ -786,8 +837,90 @@ impl TermUp {
         if create {
             self.pick_create(rt);
         }
+        if mk_start {
+            self.pick_mk_start(rt);
+        }
+        if mk_cancel {
+            if let Some(pick) = &mut self.pick {
+                pick.new_dir_prompt = false;
+                pick.new_dir_name.clear();
+            }
+        }
         if cancel {
             self.pick = None;
+        }
+    }
+
+    /// New-folder prompt confirmed: validate the name and create it inside
+    /// the currently browsed directory
+    fn pick_mk_start(&mut self, rt: &tokio::runtime::Handle) {
+        let Some(pick) = &mut self.pick else { return };
+        let name = pick.new_dir_name.trim().to_string();
+        if name.is_empty() || name.contains('/') || name.contains('\\') {
+            pick.error = Some(name);
+            return;
+        }
+        pick.busy = true;
+        pick.error = None;
+        let (tx, rx) = mpsc::unbounded_channel();
+        pick.mk_rx = Some(rx);
+        let dir = pick.dir.clone();
+        if self.local {
+            rt.spawn(async move {
+                let full = std::path::Path::new(&dir).join(&name);
+                let res = std::fs::create_dir_all(&full)
+                    .map(|_| full.to_string_lossy().into_owned())
+                    .map_err(|e| e.to_string());
+                let _ = tx.send(res);
+            });
+            return;
+        }
+        let Some(sftp) = self.sftp.clone() else { return };
+        rt.spawn(async move {
+            let g = sftp.lock().await;
+            let full = sftp::join_remote(&dir, &name);
+            let res = sftp::mkdir_all(&g, &full).await.map(|_| full);
+            drop(g);
+            let _ = tx.send(res);
+        });
+    }
+
+    /// Drain the new-folder creation result: on success navigate into the
+    /// created directory (ready for Upload here); on failure show the error
+    pub fn poll_mk(&mut self, rt: &tokio::runtime::Handle) {
+        let mut nav: Option<String> = None;
+        let mut err: Option<String> = None;
+        if let Some(pick) = &mut self.pick {
+            if let Some(rx) = &mut pick.mk_rx {
+                match rx.try_recv() {
+                    Ok(Ok(full)) => {
+                        pick.mk_rx = None;
+                        pick.busy = false;
+                        pick.new_dir_prompt = false;
+                        pick.new_dir_name.clear();
+                        pick.new_dir_focus_done = false;
+                        nav = Some(full);
+                    }
+                    Ok(Err(e)) => {
+                        pick.mk_rx = None;
+                        pick.busy = false;
+                        err = Some(e);
+                    }
+                    Err(mpsc::error::TryRecvError::Empty) => {}
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        pick.mk_rx = None;
+                        pick.busy = false;
+                    }
+                }
+            }
+        }
+        if let Some(e) = err {
+            if let Some(pick) = &mut self.pick {
+                pick.error = Some(e);
+            }
+        }
+        if let Some(full) = nav {
+            self.pick_nav(rt, &full);
         }
     }
 

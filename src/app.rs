@@ -2178,6 +2178,7 @@ impl XxsshgApp {
                         }
                         up.upload_to(&self.rt, &dir, paths);
                     }
+                    up.poll_mk(&self.rt);
                     let hover = ui.input(|i| !i.raw.hovered_files.is_empty());
                     let area = ui.max_rect();
                     crate::termup::overlay_ui(up, ui, area, hover);

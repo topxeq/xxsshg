@@ -222,6 +222,7 @@ R:0.0.0.0:80:localhost:3000"),
     ("up_listing", "Loading {dir}...", "正在读取 {dir}...", "正在讀取 {dir}..."),
     ("up_dir_missing", "Directory does not exist:\n{dir}\nCreate it and upload into it?", "目录不存在：\n{dir}\n是否创建并上传到该目录？", "目錄不存在：\n{dir}\n是否建立並上傳到該目錄？"),
     ("up_create_upload", "Create & Upload", "创建并上传", "建立並上傳"),
+    ("up_mk_create", "Create", "创建", "建立"),
     // ---- sftp list sorting ----
     ("sort_label", "Sort:", "排序：", "排序："),
     ("sort_name", "Name", "名称", "名稱"),
