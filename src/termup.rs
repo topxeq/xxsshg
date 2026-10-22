@@ -141,11 +141,21 @@ impl TermUp {
     /// resets so the next drop starts a fresh attempt. Pending drops are
     /// discarded — auto-retrying an auth that just failed would loop.
     pub fn take_failure(&mut self) -> Option<String> {
-        if let UpState::Failed(msg) = std::mem::replace(&mut self.state, UpState::Idle) {
-            self.pending.clear();
-            Some(msg)
-        } else {
-            None
+        // GUARD: only reset when actually Failed. This runs EVERY frame; an
+        // unconditional `mem::replace(.., Idle)` here clobbered Ready and
+        // Connecting — the kick then re-opened the channel per frame (the
+        // connection flood behind the original os error 10054, and the
+        // "opening upload channel" hang).
+        if !matches!(self.state, UpState::Failed(_)) {
+            return None;
+        }
+        match std::mem::replace(&mut self.state, UpState::Idle) {
+            UpState::Failed(msg) => {
+                crate::diag::uplog(&format!("take_failure: {msg} (pending cleared)"));
+                self.pending.clear();
+                Some(msg)
+            }
+            _ => unreachable!("state was Failed just above"),
         }
     }
 
