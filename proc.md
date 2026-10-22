@@ -103,6 +103,14 @@
 
 ---
 
+## 2026-10-22 v0.10.4：选择框锚定远端主目录而非 /
+
+- 用户实测 0.10.3 正常（不再卡死），但选择框锚在 /：canonicalize(".") 的往返（~30ms）通常晚于选择框打开，anchor=None 回退到 /
+- 修复：TermUp 记录 home_done（主目录解析完成标志）；cwd 不可信时**等主目录解析完成再弹框**（pending 多持有一帧），锚点取真实主目录（root 登录即 /root）
+- 64 测试全过；公网 latest=Windows GUI v0.10.4；已推送（20ea02c）
+
+---
+
 ## 2026-10-22 v0.10.3：抓到真凶——take_failure() 每帧无条件重置状态机（10054 的真正根因）
 
 - upload-debug.log 显示：SFTP 通道每次都在 0.5s 内成功打开，但 connect_via_session 以 ~80ms 周期无限重发——状态机被反复清回 Idle
