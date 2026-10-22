@@ -25,6 +25,11 @@ fn local_hostname() -> String {
     std::env::var("COMPUTERNAME").unwrap_or_default()
 }
 
+/// Per-profile memory key for the last drag-drop upload directory
+fn upload_dir_key(server: &Server) -> String {
+    format!("{}:{}", server.host, server.port)
+}
+
 /// Effective connection options: per-server proxy > global proxy (same merge as xxssh)
 fn resolve_opts(server: &Server, settings: &AppSettings) -> ConnectOpts {
     let proxy = if !server.proxy.trim().is_empty() {
@@ -660,6 +665,17 @@ impl XxsshgApp {
 
     fn toast(&mut self, msg: String) {
         self.status_msg = Some((msg, std::time::Instant::now()));
+    }
+
+    /// Persist the last upload directory for this server profile (the
+    /// drag-drop picker anchors there next time)
+    fn remember_upload_dir(&mut self, server: &Server, dir: &str) {
+        let key = upload_dir_key(server);
+        if self.gcfg.last_upload_dir.get(&key).map(|d| d != dir).unwrap_or(true) {
+            self.gcfg.last_upload_dir.insert(key, dir.to_string());
+            let _ = crate::gconfig::save(&self.gui_path, &self.gcfg);
+            crate::diag::uplog(&format!("remembered upload dir for {}: {dir}", server.host));
+        }
     }
 
     /// Test hook (XXSSHG_SIM_DROP): enqueue a fake OS drop on the active tab
@@ -1932,6 +1948,15 @@ impl XxsshgApp {
         let mut do_reconnect = false;
         let mut do_close = false;
         let mut up_note: Option<String> = None;
+        // per-profile last upload dir (anchor for the picker), read before the
+        // tabs borrow starts
+        let remembered_dir = match self.tabs.get(self.active_tab) {
+            Some(Tab::Open { server: Some(s), .. }) => {
+                self.gcfg.last_upload_dir.get(&upload_dir_key(s)).cloned()
+            }
+            _ => None,
+        };
+        let mut remember_dir: Option<(Server, String)> = None;
         let mut tunnel_actions: Vec<TunnelAction> = Vec::new();
         match &mut self.tabs[i] {
             Tab::Connecting { status, .. } => {
@@ -2090,19 +2115,22 @@ impl XxsshgApp {
                                         crate::diag::uplog(&format!(
                                             "cwd trusted: direct upload into {dir}"
                                         ));
+                                        if let Some(srv) = server {
+                                            remember_dir = Some((srv.clone(), dir.clone()));
+                                        }
                                         let msg =
                                             tpl(tr(up.lang, "up_direct"), &[("dir", &dir)]);
                                         up.note(msg);
                                         up.upload_to(&self.rt, &dir, paths);
                                     }
                                     None if up.home_done => {
-                                        // commit: consume the drops now
-                                        let paths = std::mem::take(&mut up.pending);
                                         crate::diag::uplog(&format!(
-                                            "cwd not trusted: opening remote picker (home={:?})",
+                                            "cwd not trusted: opening remote picker (remembered={remembered_dir:?}, home={:?})",
                                             up.home
                                         ));
-                                        let anchor = up.home.clone();
+                                        let anchor =
+                                            remembered_dir.clone().or_else(|| up.home.clone());
+                                        let paths = std::mem::take(&mut up.pending);
                                         up.pick_open(&self.rt, paths, anchor);
                                     }
                                     // home round-trip still in flight: leave the
@@ -2145,6 +2173,9 @@ impl XxsshgApp {
                         }
                     }
                     if let Some((dir, paths)) = up.poll_pick() {
+                        if let Some(srv) = server {
+                            remember_dir = Some((srv.clone(), dir.clone()));
+                        }
                         up.upload_to(&self.rt, &dir, paths);
                     }
                     let hover = ui.input(|i| !i.raw.hovered_files.is_empty());
@@ -2170,6 +2201,9 @@ impl XxsshgApp {
                 _ => None,
             };
             self.run_tunnel_actions(tunnel_actions, server);
+        }
+        if let Some((srv, dir)) = remember_dir {
+            self.remember_upload_dir(&srv, &dir);
         }
         if let Some(note) = up_note {
             self.toast(note);

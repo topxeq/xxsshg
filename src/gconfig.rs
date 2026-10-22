@@ -91,6 +91,11 @@ pub struct GuiConfig {
     /// wheel up scrolls back into history)
     #[serde(default)]
     pub invert_scrolling: bool,
+    /// Last upload target per server profile ("host:port" -> remote dir):
+    /// the drag-drop picker anchors there; first time falls back to the
+    /// user's home directory
+    #[serde(default)]
+    pub last_upload_dir: std::collections::BTreeMap<String, String>,
     /// Hotkey to close the active tab (format "Ctrl+W"); empty = disabled
     #[serde(default = "default_hk_close")]
     pub hotkey_close_tab: String,
@@ -223,6 +228,7 @@ impl Default for GuiConfig {
             show_sidebar: true,
             bell: BellMode::default(),
             invert_scrolling: false,
+            last_upload_dir: std::collections::BTreeMap::new(),
             hotkey_close_tab: default_hk_close(),
             hotkey_new_cmd: default_hk_new_cmd(),
             quick_host: String::new(),
