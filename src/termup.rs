@@ -76,6 +76,9 @@ pub struct TermUp {
     pub sftp: Option<Arc<tokio::sync::Mutex<SftpSession>>>,
     /// remote user's home directory (canonicalize "."), when resolved
     pub home: Option<String>,
+    /// the home resolution round-trip finished (home may still be None on
+    /// failure) — the picker must not open before this
+    pub home_done: bool,
     home_rx: Option<oneshot::Receiver<Option<String>>>,
     /// items dropped while the SFTP channel was not ready yet
     pub pending: Vec<PathBuf>,
@@ -106,6 +109,7 @@ impl TermUp {
             state: if local { UpState::Ready } else { UpState::Idle },
             sftp: None,
             home: None,
+            home_done: false,
             home_rx: None,
             pending: Vec::new(),
             pick: None,
@@ -297,11 +301,14 @@ impl TermUp {
             match rx.try_recv() {
                 Ok(home) => {
                     self.home = home.or(self.home.take());
+                    self.home_done = true;
                 }
                 Err(oneshot::error::TryRecvError::Empty) => {
                     self.home_rx = Some(rx);
                 }
-                Err(oneshot::error::TryRecvError::Closed) => {}
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    self.home_done = true;
+                }
             }
         }
     }

@@ -2094,13 +2094,18 @@ impl XxsshgApp {
                                         up.note(msg);
                                         up.upload_to(&self.rt, &dir, paths);
                                     }
-                                    None => {
-                                        crate::diag::uplog(
-                                            "cwd not trusted: opening remote picker",
-                                        );
+                                    None if up.home_done => {
+                                        crate::diag::uplog(&format!(
+                                            "cwd not trusted: opening remote picker (home={:?})",
+                                            up.home
+                                        ));
                                         let anchor = up.home.clone();
                                         up.pick_open(&self.rt, paths, anchor);
                                     }
+                                    // home round-trip still in flight: hold the
+                                    // pending drops one more frame so the picker
+                                    // anchors at the real home, not "/"
+                                    None => {}
                                 }
                             }
                         } else {
