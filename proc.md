@@ -6,6 +6,16 @@
 
 ---
 
+## 2026-11-02 终端 Home/End 改回行首/行尾，Ctrl+Home/End 才滚缓冲区
+
+- 用户反馈：readline 行编辑里 Home/End 更常用，此前（0.2.0 起）Home/End 被劫持为滚缓冲区不对
+- 反转：**Home/End（含 Shift+）发远端 `\x1b[H`/`\x1b[F`**（bash/zsh → 行首/行尾），**Ctrl+Home/End 本地滚动到缓冲区头/尾**；alt-screen（vim/less）下全部直通远端
+- 改动：src/term.rs 输入处理一处条件（原 `!modifiers.any()` → `ctrl && !shift && !alt`，且仍要求非 alt-screen）；cargo check 通过（start_col 警告系既有，非本次引入）
+- **滚动热键改为可配置（同日追加）**：用户要求不定死——gconfig 新增 `hotkey_scroll_top`/`hotkey_scroll_bottom`（默认 "Ctrl+Home"/"Ctrl+End"，留空禁用，serde default 兼容旧配置）；term.rs 新增 `hotkey_scroll_top/bottom` 字段，滚动改按配置热键匹配（复用 hotkey_close 的 `m` 元组模式，仍在 alt-screen 直通）；app.rs 设置页加两行 + 保存校验，i18n 补 `hk_scroll_top`/`hk_scroll_bottom` 四元组；i18n 完整性测试通过
+
+---
+---
+
 ## 2026-10-17 发布：CLI v0.5.6（SOCKS5 修复）+ GUI v0.10.0（隧道管理界面）
 
 - CLI：6591db6（SOCKS5 垃圾应答修复 + 0.5.6 + conf.json 描述）→ tag v0.5.6 → release.yml 全绿（run 38999187542）→ 4 个 publish-0.5.6*.ps1 逐平台发布，vid：Windows ver-17922084422860c2 / Linux x64 ver-17922084852b95ed / ARM64 ver-1792208494e02164 / macOS ver-17922085025d92d8；各平台 0.5.5 已删
@@ -471,7 +481,7 @@
 - **本地终端**：CMD/PowerShell/$SHELL 侧栏入口，portable-pty ConPTY → SessionHandle 适配（clink 自动注入生效）
 - **快速连接**：⚡按钮 + 对话框（主机/端口/用户/密码，不写入 servers.json；记住主机/端口/用户，密码绝不落盘；回车提交）
 - **滚动条**：终端右缘（拖动滑块/点击轨道），方向与主流终端一致（滑块底部=实时最新）
-- **Home/End**：滚动到缓冲区头/尾（Shift+Home/End 发远端做行编辑；alt-screen 下直通远端）
+- **Home/End**：滚动到缓冲区头/尾（Shift+Home/End 发远端做行编辑；alt-screen 下直通远端）〔2026-11-02 已反转：Home/End 发远端，Ctrl+Home/End 滚动，见顶部〕
 - **热键**：Ctrl+W 关闭当前页签、Ctrl+N 新开 CMD 页签；应用级全局生效（输入层状态机边沿检测），设置里可自定义（格式 "Ctrl+W"，留空禁用）
 - **UI**：Connect 行布局修正（⚡/☰ 固定槽位不再溢出）、☰ 与 ⚡ 等尺寸、退出确认框居中、快速连接回车提交
 - **渲染**：BASELINE TOP 对齐（文字不再偏低）、首行 ascender 裁剪余量、CJK 基线按字体 hhea 度量精确补偿、build hash 修正（盯 refs/heads/main）

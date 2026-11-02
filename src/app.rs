@@ -2049,6 +2049,10 @@ impl XxsshgApp {
                 } else {
                     term.hotkey_close = crate::gconfig::parse_hotkey(&self.gcfg.hotkey_close_tab);
                     term.hotkey_new = crate::gconfig::parse_hotkey(&self.gcfg.hotkey_new_cmd);
+                    term.hotkey_scroll_top =
+                        crate::gconfig::parse_hotkey(&self.gcfg.hotkey_scroll_top);
+                    term.hotkey_scroll_bottom =
+                        crate::gconfig::parse_hotkey(&self.gcfg.hotkey_scroll_bottom);
                     let resized = term.paint(ui, self.gcfg.font_size, self.gcfg.copy_on_select, self.gcfg.invert_scrolling);
                     if let Some(zoom) = term.pending_zoom.take() {
                         if zoom.is_nan() {
@@ -2534,6 +2538,18 @@ impl XxsshgApp {
                                     .hint_text("Ctrl+N"),
                             );
                             ui.end_row();
+                            ui.label(tr(lang, "hk_scroll_top"));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.gcfg.hotkey_scroll_top)
+                                    .hint_text("Ctrl+Home"),
+                            );
+                            ui.end_row();
+                            ui.label(tr(lang, "hk_scroll_bottom"));
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.gcfg.hotkey_scroll_bottom)
+                                    .hint_text("Ctrl+End"),
+                            );
+                            ui.end_row();
                             ui.label(tr(lang, "s_font"));
                             egui::ComboBox::from_id_salt("font_cb")
                                 .selected_text(if self.gcfg.font_family.is_empty() {
@@ -2566,6 +2582,11 @@ impl XxsshgApp {
                             let checks = vec![
                                 (tr(lang, "hk_close_tab"), self.gcfg.hotkey_close_tab.clone()),
                                 (tr(lang, "hk_new_cmd"), self.gcfg.hotkey_new_cmd.clone()),
+                                (tr(lang, "hk_scroll_top"), self.gcfg.hotkey_scroll_top.clone()),
+                                (
+                                    tr(lang, "hk_scroll_bottom"),
+                                    self.gcfg.hotkey_scroll_bottom.clone(),
+                                ),
                             ];
                             for (label, val) in &checks {
                                 if !val.trim().is_empty()

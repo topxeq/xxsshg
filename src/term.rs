@@ -294,6 +294,11 @@ pub struct Terminal {
     /// to the PTY — the app layer performs the action (close tab / new cmd)
     pub hotkey_close: Option<(bool, bool, bool, egui::Key)>,
     pub hotkey_new: Option<(bool, bool, bool, egui::Key)>,
+    /// Scroll-to-head/tail hotkeys (defaults Ctrl+Home/Ctrl+End); matching
+    /// input scrolls the LOCAL buffer instead of reaching the PTY. Performed
+    /// in-widget (display-side), unlike hotkey_close/hotkey_new. None = off.
+    pub hotkey_scroll_top: Option<(bool, bool, bool, egui::Key)>,
+    pub hotkey_scroll_bottom: Option<(bool, bool, bool, egui::Key)>,
     /// One-shot actions for the app layer (close tab / open new cmd tab)
     pub pending_close_tab: bool,
     pub pending_new_cmd: bool,
@@ -371,6 +376,8 @@ impl Terminal {
                 pending_zoom: None,
                 hotkey_close: None,
                 hotkey_new: None,
+                hotkey_scroll_top: None,
+                hotkey_scroll_bottom: None,
                 pending_close_tab: false,
                 pending_new_cmd: false,
                 scroll_drag: None,
@@ -888,7 +895,6 @@ impl Terminal {
                     && (0x20..=0x7e).contains(&(cell.c as u32))
                 {
                     let run_fg = fg;
-                    let start_col = col_i;
                     let mut run = String::with_capacity(48);
                     while col_i < self.cols as usize {
                         let c = &grid_row[Column(col_i)];
@@ -1574,21 +1580,19 @@ impl Terminal {
                             self.reset_modes();
                             continue;
                         }
-                        // Home/End scroll the local buffer to head/tail (user
-                        // request); Shift+Home/End still reach the remote for
-                        // readline line-editing. In alt-screen (vim/less) both
-                        // go to the remote.
-                        if !modifiers.any() && !mode.contains(TermMode::ALT_SCREEN) {
-                            match key {
-                                egui::Key::Home => {
-                                    self.term.scroll_display(Scroll::Top);
-                                    continue;
-                                }
-                                egui::Key::End => {
-                                    self.term.scroll_display(Scroll::Bottom);
-                                    continue;
-                                }
-                                _ => {}
+                        // Scroll-to-head/tail hotkeys (configurable, defaults
+                        // Ctrl+Home/Ctrl+End, empty disables). Plain Home/End
+                        // reach the remote for readline line-editing. In
+                        // alt-screen (vim/less) the configured keys still go
+                        // to the remote.
+                        if !mode.contains(TermMode::ALT_SCREEN) {
+                            if self.hotkey_scroll_top == Some(m) {
+                                self.term.scroll_display(Scroll::Top);
+                                continue;
+                            }
+                            if self.hotkey_scroll_bottom == Some(m) {
+                                self.term.scroll_display(Scroll::Bottom);
+                                continue;
                             }
                         }
                         // NB: plain Ctrl+C / Ctrl+X / Ctrl+V never arrive here —

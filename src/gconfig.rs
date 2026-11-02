@@ -102,6 +102,14 @@ pub struct GuiConfig {
     /// Hotkey to open a new local CMD tab (format "Ctrl+N"); empty = disabled
     #[serde(default = "default_hk_new_cmd")]
     pub hotkey_new_cmd: String,
+    /// Hotkey to scroll the terminal buffer to the top (format "Ctrl+Home");
+    /// empty = disabled (Home/End pass through to the remote readline)
+    #[serde(default = "default_hk_scroll_top")]
+    pub hotkey_scroll_top: String,
+    /// Hotkey to scroll the terminal buffer to the bottom (format "Ctrl+End");
+    /// empty = disabled
+    #[serde(default = "default_hk_scroll_bottom")]
+    pub hotkey_scroll_bottom: String,
     /// Last Quick Connect values (password is never persisted)
     #[serde(default)]
     pub quick_host: String,
@@ -119,6 +127,12 @@ fn default_hk_close() -> String {
 }
 fn default_hk_new_cmd() -> String {
     "Ctrl+N".into()
+}
+fn default_hk_scroll_top() -> String {
+    "Ctrl+Home".into()
+}
+fn default_hk_scroll_bottom() -> String {
+    "Ctrl+End".into()
 }
 
 /// Parse a hotkey string like "Ctrl+Shift+W" into (ctrl, shift, alt, egui key).
@@ -231,6 +245,8 @@ impl Default for GuiConfig {
             last_upload_dir: std::collections::BTreeMap::new(),
             hotkey_close_tab: default_hk_close(),
             hotkey_new_cmd: default_hk_new_cmd(),
+            hotkey_scroll_top: default_hk_scroll_top(),
+            hotkey_scroll_bottom: default_hk_scroll_bottom(),
             quick_host: String::new(),
             quick_port: 22,
             quick_user: String::from("root"),
