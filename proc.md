@@ -12,6 +12,8 @@
 - 反转：**Home/End（含 Shift+）发远端 `\x1b[H`/`\x1b[F`**（bash/zsh → 行首/行尾），**Ctrl+Home/End 本地滚动到缓冲区头/尾**；alt-screen（vim/less）下全部直通远端
 - 改动：src/term.rs 输入处理一处条件（原 `!modifiers.any()` → `ctrl && !shift && !alt`，且仍要求非 alt-screen）；cargo check 通过（start_col 警告系既有，非本次引入）
 - **滚动热键改为可配置（同日追加）**：用户要求不定死——gconfig 新增 `hotkey_scroll_top`/`hotkey_scroll_bottom`（默认 "Ctrl+Home"/"Ctrl+End"，留空禁用，serde default 兼容旧配置）；term.rs 新增 `hotkey_scroll_top/bottom` 字段，滚动改按配置热键匹配（复用 hotkey_close 的 `m` 元组模式，仍在 alt-screen 直通）；app.rs 设置页加两行 + 保存校验，i18n 补 `hk_scroll_top`/`hk_scroll_bottom` 四元组；i18n 完整性测试通过
+- **顺手清理**：删除 0.8.4（d241c05）引入的死变量 `start_col`（批量绘制 run 起始列赋值后从未读），cargo check 归零警告
+- **发布 GUI 0.10.8**：568eae1 → release 重编 → `--version` 核对 `v0.10.8 (568eae1)` → publish-xxsshg-0.10.8.ps1 一次跑完 → vid=ver-17935874075b44a0，18.21MB，sha256 4d1b3988…878691；cleanup 删 0.10.7；已推送 github.com/topxeq/xxsshg（458410a..568eae1）；公网 API 核对 Windows GUI 0.10.8 latest=True sha 前 8 位一致（CLI 四平台保持 0.5.6），实下 xxsshg.exe sha 一致、运行输出 `v0.10.8 (568eae1)`（首下 120s 超时断在 16.6/19.1MB，-C 断点续传补完）
 
 ---
 ---
