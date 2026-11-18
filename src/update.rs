@@ -2,8 +2,9 @@
 //!
 //! Protocol mirrors xxssh 0.5.2 src/update.rs (same product card): query
 //! `https://magicdo.top/api/products?id=xxssh`, pick the highest isLatest
-//! version's entry for THIS platform ("Windows GUI" — must not match the TUI's
-//! plain "Windows" entry), download to `<exe>.new`, verify sha256, then
+//! version's entry for THIS variant's platform (glow build = "Windows GUI",
+//! wgpu build = "Windows GUI wgpu" — must never cross-match each other or the
+//! TUI's plain "Windows" entry), download to `<exe>.new`, verify sha256, then
 //! `<exe>` → `<exe>.old`, `<exe>.new` → `<exe>`, detached cleanup of `.old`.
 //!
 //! Two entry points:
@@ -83,11 +84,17 @@ pub fn check() -> Result<UpdateCheck, String> {
     })
 }
 
-/// the GUI build ships as platform "Windows GUI" on the shared xxssh card —
-/// the plain "Windows" entry is the TUI and must never match
+/// The GUI build ships per variant on the shared xxssh card: the glow build
+/// as "Windows GUI", the wgpu build as "Windows GUI wgpu" — exact match, so a
+/// wgpu-user's in-app update never serves the glow exe (or vice versa), and
+/// neither ever matches the TUI's plain "Windows" entry.
 fn is_gui_platform(platform: &str) -> bool {
-    let p = platform.to_lowercase();
-    p.contains("windows") && p.contains("gui")
+    const OURS: &str = if cfg!(feature = "wgpu") {
+        "windows gui wgpu"
+    } else {
+        "windows gui"
+    };
+    platform.trim().to_lowercase() == OURS
 }
 
 fn is_x64_arch(arch: &str) -> bool {

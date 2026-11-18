@@ -18,6 +18,12 @@ mod sftp;
 mod sftpui;
 mod term;
 mod termup;
+
+// The variants are separate binaries over the same source (see Cargo.toml
+// [[bin]]); building with both features is always a mistake.
+#[cfg(all(feature = "glow", feature = "wgpu"))]
+compile_error!("build ONE variant: default (glow) or --no-default-features --features wgpu");
+
 mod tunnel;
 mod txdef;
 mod update;
@@ -29,7 +35,12 @@ fn main() -> eframe::Result {
     // --version for install scripts (matches \d+\.\d+\.\d+)
     let args: Vec<String> = std::env::args().collect();
     if args.iter().any(|a| a == "--version" || a == "-V") {
-        println!("xxsshg v{} ({})", env!("CARGO_PKG_VERSION"), env!("XXSSHG_BUILD_HASH"));
+        println!(
+            "{} v{} ({})",
+            env!("CARGO_BIN_NAME"),
+            env!("CARGO_PKG_VERSION"),
+            env!("XXSSHG_BUILD_HASH")
+        );
         return Ok(());
     }
 
@@ -107,7 +118,55 @@ fn main() -> eframe::Result {
             .with_maximized(gcfg.window.maximized);
     }
 
-    let options = eframe::NativeOptions { viewport, ..Default::default() };
+    // Renderer per build variant. glow (default): raw OpenGL, best on real
+    // GPUs. wgpu: D3D12 with an adapter selector that prefers hardware but
+    // falls back to the software rasterizer (WARP / "Microsoft Basic Render
+    // Driver", DeviceType::Cpu) — the whole point of the wgpu variant is to
+    // start on VMs with no GPU driver at all, where glow dies on OpenGL < 2.0.
+    #[cfg(feature = "glow")]
+    let options = eframe::NativeOptions {
+        viewport,
+        renderer: eframe::Renderer::Glow,
+        ..Default::default()
+    };
+    #[cfg(feature = "wgpu")]
+    let options = {
+        let selector = |adapters: &[eframe::wgpu::Adapter],
+                        _surface: Option<&eframe::wgpu::Surface<'_>>|
+         -> Result<eframe::wgpu::Adapter, String> {
+            adapters
+                .iter()
+                .min_by_key(|a| match a.get_info().device_type {
+                    // software rasterizer last
+                    eframe::wgpu::DeviceType::Cpu | eframe::wgpu::DeviceType::Other => 1,
+                    _ => 0,
+                })
+                .cloned()
+                .ok_or_else(|| {
+                    "no wgpu adapter available (no GPU driver and no software rasterizer)".into()
+                })
+        };
+        eframe::NativeOptions {
+            viewport,
+            renderer: eframe::Renderer::Wgpu,
+            wgpu_options: eframe::WgpuConfiguration {
+                wgpu_setup: eframe::egui_wgpu::WgpuSetup::CreateNew(
+                    eframe::egui_wgpu::WgpuSetupCreateNew {
+                        native_adapter_selector: Some(std::sync::Arc::new(selector)),
+                        device_descriptor: std::sync::Arc::new(|_adapter| {
+                            eframe::wgpu::DeviceDescriptor {
+                                label: Some("xxsshg".into()),
+                                ..Default::default()
+                            }
+                        }),
+                        ..eframe::egui_wgpu::WgpuSetupCreateNew::without_display_handle()
+                    },
+                ),
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    };
 
     // NB: `rt` must stay alive in this scope for the whole app lifetime — a Runtime
     // dropped (e.g. moved into the creator closure, which eframe discards after the
@@ -166,10 +225,11 @@ fn show_error_box(text: &str) {
 #[cfg(not(windows))]
 fn show_error_box(_text: &str) {}
 
-/// Window title with version + build number, e.g. "xxsshg v0.1.0 (7dd959a)"
+/// Window title with binary name (xxsshg / xxsshg-wgpu) + version + build hash
 fn window_title() -> String {
     format!(
-        "xxsshg v{} ({})",
+        "{} v{} ({})",
+        env!("CARGO_BIN_NAME"),
         env!("CARGO_PKG_VERSION"),
         env!("XXSSHG_BUILD_HASH")
     )
