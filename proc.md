@@ -12,6 +12,7 @@
 - **根因（两个叠加）**：① 动态 CRT → 干净系统缺 VCRUNTIME140.dll（Win10 只内置 UCRT）；② `windows_subsystem=windows` 的 release 无控制台，eframe/glow 创建 OpenGL 上下文失败（未装 guest tools 的 VM 只有 GL 1.1）panic/Err 全部不可见
 - **修复**：`.cargo/config.toml` 加 `+crt-static`（依赖表只剩系统自带的 api-ms-win-core-synch-l1-2-0）；main.rs 挂 panic hook + `run_native` Err 弹 `MessageBoxW`（extern 声明零新依赖，每进程一次防刷屏），写 session-debug.log，附虚拟机 3D 加速提示
 - **发布 GUI 0.10.9**：78febc0 → `v0.10.9 (78febc0)` → publish-xxsshg-0.10.9.ps1 → vid=ver-17949696224b799b，18.33MB，sha256 bd7b7a0c…20934；cleanup 删 0.10.8；已推送（35d67a5..78febc0）；实下 sha 一致、输出 `v0.10.9 (78febc0)`；cargo test 64/64
+- **用户 VM 实测确认（0.10.9 弹窗截图）**：报 `egui_glow requires opengl 2.0+`——GL 1.1 根因坐实，且说明静态 CRT 生效（加载器已过，死在 GL 初始化）；处理 = VMware 开「加速 3D 图形」+ 装 VMware Tools（SVGA 3D 驱动带 GL 4.3）
 - 经验已记 exp1.md（GUI 子系统崩溃不可见；VM 无 GL 需装 tools/开 3D 加速，或换 wgpu）
 
 ---
