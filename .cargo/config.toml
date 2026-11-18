@@ -1,0 +1,6 @@
+# Statically link the MSVC CRT (vcruntime140 + ucrt): the published
+# single-file xxsshg.exe must run on a clean Windows 10 box with no
+# VC++ Redistributable installed. Without this, startup fails with
+# "VCRUNTIME140.dll not found" on fresh systems/VMs.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

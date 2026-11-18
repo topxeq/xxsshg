@@ -36,6 +36,32 @@ fn main() -> eframe::Result {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("warn"))
         .init();
 
+    // Release GUI builds have no console (windows_subsystem="windows"): a
+    // startup panic — e.g. eframe/glow failing to create the OpenGL context
+    // on a VM without GPU acceleration — used to die with ZERO feedback
+    // ("double click, instant exit"). Route panics to a native error box
+    // (first occurrence only, no dialog spam from worker threads) and to
+    // the session-debug log so the cause is always visible.
+    std::panic::set_hook(Box::new(|info| {
+        let mut msg = match info.payload().downcast_ref::<&str>() {
+            Some(s) => (*s).to_string(),
+            None => match info.payload().downcast_ref::<String>() {
+                Some(s) => s.clone(),
+                None => "unknown panic".into(),
+            },
+        };
+        if let Some(loc) = info.location() {
+            msg = format!("{msg} ({}:{})", loc.file(), loc.line());
+        }
+        diag::log(&format!("BOOT PANIC: {msg}"));
+        if !PANIC_BOX_SHOWN.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            show_error_box(&format!(
+                "xxsshg crashed:\n{msg}\n\n{}\n~/.xxssh/session-debug.log",
+                "（详细日志见 ~/.xxssh/session-debug.log / see the log for details）"
+            ));
+        }
+    }));
+
     // sweep a leftover .old backup from a previous self-update
     update::cleanup_old_at_startup();
 
@@ -89,7 +115,7 @@ fn main() -> eframe::Result {
     let rt_handle = rt.handle().clone();
     let mono_choice = gcfg.font_family.clone();
     let sharp_font = gcfg.sharp_font;
-    eframe::run_native(
+    let res = eframe::run_native(
         "xxsshg",
         options,
         Box::new(move |cc| {
@@ -104,8 +130,41 @@ fn main() -> eframe::Result {
                 gcfg,
             )))
         }),
-    )
+    );
+    if let Err(e) = &res {
+        // eframe can return instead of panicking (window/GL creation failure);
+        // same visibility contract as the panic hook above.
+        let msg = format!("eframe: {e}");
+        diag::log(&format!("BOOT FAIL: {msg}"));
+        show_error_box(&format!(
+            "xxsshg failed to start:\n{msg}\n\n提示/hint: OpenGL 相关报错通常是显卡驱动过旧（虚拟机请安装 VMware Tools 并开启 3D 加速 / install guest tools & enable 3D acceleration）\n~/.xxssh/session-debug.log"
+        ));
+    }
+    res
 }
+
+/// One-shot flag: the panic hook shows at most one error box per process
+/// (tokio worker panics otherwise could spam dialogs).
+static PANIC_BOX_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Native error box (MB_ICONERROR). GUI-subsystem builds have no console and
+/// no new deps are wanted — declare user32's MessageBoxW directly (user32 is
+/// already in the import table).
+#[cfg(windows)]
+fn show_error_box(text: &str) {
+    #[link(name = "user32")]
+    extern "system" {
+        fn MessageBoxW(hwnd: isize, text: *const u16, caption: *const u16, utype: u32) -> i32;
+    }
+    let mut wide: Vec<u16> = text.encode_utf16().collect();
+    wide.push(0);
+    let mut cap: Vec<u16> = "xxsshg".encode_utf16().collect();
+    cap.push(0);
+    unsafe { MessageBoxW(0, wide.as_ptr(), cap.as_ptr(), 0x10) };
+}
+
+#[cfg(not(windows))]
+fn show_error_box(_text: &str) {}
 
 /// Window title with version + build number, e.g. "xxsshg v0.1.0 (7dd959a)"
 fn window_title() -> String {

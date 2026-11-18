@@ -1,5 +1,33 @@
 # xxsshg 开发与发布经验
 
+## GUI 子系统 release：panic 被完全吞掉 → 必须挂 panic hook + 原生错误框
+
+### 问题
+Win10 虚拟机（VMware，无 3D 加速）双击 xxsshg.exe 秒退，无任何提示，无法定位。
+
+### 根因
+两个问题叠加：
+1. 动态 CRT 链接（默认）：干净系统没有 VCRUNTIME140.dll（属于 VC++ Redistributable，
+   Win10 只内置 UCRT 即 api-ms-win-crt-*），加载阶段就起不来；
+2. `windows_subsystem="windows"` 的 release 构建没有控制台：eframe/glow 创建 OpenGL
+   上下文失败（未装 guest tools 的 VM 只有 GDI Generic GL 1.1，glow 需 2.0+）内部
+   `expect`/panic 或 `run_native` 返回 Err，全部不可见——就是「双击秒退」。
+
+### 修复
+- `.cargo/config.toml`：`[target.x86_64-pc-windows-msvc] rustflags = ["-C",
+  "target-feature=+crt-static"]`，静态链接 MSVC CRT + UCRT → 真正单文件可移植
+  （依赖里只剩 api-ms-win-core-synch-l1-2-0，Win8+ 系统自带）
+- main.rs：`set_hook` 把 panic 写入 session-debug.log 并弹 `MessageBoxW`
+  （`extern "system"` 直接声明 user32，不加依赖；`AtomicBool` 保证每进程只弹一次，
+  防 tokio worker panic 刷屏）；`run_native` 的 Err 同样弹框，附 OpenGL/虚拟机
+  3D 加速提示
+
+### 关键点
+- `windows_subsystem=windows` 的崩溃对用户 100% 不可见；GUI 程序发版前必须测
+  「无 GPU/干净系统」路径
+- 排查顺序：`--version` 能打印 = 加载器/CRT 无问题 → 剩图形初始化；设备管理器看
+  显示适配器是「VMware SVGA 3D」还是「Microsoft 基本显示适配器」
+
 ## russh 端口转发：OpenSSH 的 tcpip-forward 成功应答在指定端口时不带端口号
 
 ### 问题
