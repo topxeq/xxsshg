@@ -6,6 +6,20 @@
 
 ---
 
+## 2026-11-18 双版本：glow（原版继续）+ wgpu（无 GPU 虚拟机可用）（GUI 0.10.10）
+
+- 用户需求：VM 配置改不了（装不了 Tools/开不了 3D），但要 win10 能用；又不接受原版降性能 → **出两个版本**
+- **结构**：同一份源码、Cargo feature 切换——`xxsshg`（默认 feature `glow`，原版 OpenGL，性能不变）+ `xxsshg-wgpu`（feature `wgpu`，wgpu D3D12，24.6MB vs 18.3MB）；两 `[[bin]]` + `required-features` + main.rs `compile_error!` 防双 feature
+- **wgpu 适配器选择器**：`native_adapter_selector` 硬件优先（Discrete/Integrated/VirtualGpu 排前），无硬件自动落 **WARP 软渲染**（`DeviceType::Cpu`，即「Microsoft 基本显示适配器」）——一个选择器同时覆盖实体机和无 GPU VM
+- **自更新按变体精确匹配**：`is_gui_platform` 由子串匹配改为变体常量精确匹配（glow="Windows GUI"，wgpu="Windows GUI wgpu"），wgpu 用户点更新不会被发回 glow 版；`--version`/窗口标题带 `CARGO_BIN_NAME`
+- **验证**：cargo test 64/64；两变体本机冒烟 6s 存活；**WARP 路径实机验证**（临时反转选择器优先软件适配器，app 正常跑）→ VM 里会有什么行为直接确认过
+- **发布 0.10.10 双条目**：50044ee → publish-xxsshg-0.10.10.ps1（glow，sha256 d943adab…c410）+ publish-xxsshg-0.10.10-wgpu.ps1（wgpu，sha256 49deb356…745d0）→ 双条目 latest=True；双下载核对一致；已推送（582a316..50044ee）
+- cleanup-gui-latest.py 扩展为双平台循环（原写死 Windows GUI，wgpu 旧条目会永远残留），keep=0.10.10 实跑验证零删除
+- 踩坑：sed 往 .ps1 写 `\r` 被后续 python splitlines 拆成半行孤儿（`eleasexxsshg-wgpu.exe"`），未闭合引号毁掉整脚本解析——生成/修补 ps1 用整行重写，别用带反斜杠的 sed 替换
+
+---
+---
+
 ## 2026-11-18 修复：Win10/虚拟机跑不起来——静态 CRT + 启动失败可见化（GUI 0.10.9）
 
 - **现象**：VMware Win10 虚拟机双击 xxsshg.exe 无反应/秒退，无任何提示
