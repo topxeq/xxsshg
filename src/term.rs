@@ -324,6 +324,15 @@ pub struct Terminal {
     extending_selection: bool,
     /// last logged render-metrics tuple (ppp, font_size, cell_w, cell_h) bits
     last_metrics: Option<(u32, u32, u32, u32)>,
+    /// egui layout advance minus cell_w, per char, at the current raster size
+    /// (from the galley-of-20 measurement below). Some hinted sizes differ from
+    /// the q()-snapped cell_w by up to ±0.19px/char; batched run drawing must
+    /// fall back to per-char galleys when that would accumulate visibly.
+    adv_delta: f32,
+    /// Single-char galleys for the per-char run fallback: (char, font px bits,
+    /// color) → galley. Cleared on every metrics change (sizes/fonts/colors are
+    /// bounded in practice; a runaway session clears at 8192 entries).
+    glyph_cache: std::collections::HashMap<(char, u32, [u8; 4]), std::sync::Arc<egui::Galley>>,
     /// Working directory reported by the shell via OSC 7 (percent-decoded
     /// absolute path). Only trusted when `trusted_cwd` passes host+staleness.
     pub cwd: Option<String>,
@@ -389,6 +398,8 @@ impl Terminal {
                 last_ime_rect: None,
                 extending_selection: false,
                 last_metrics: None,
+                adv_delta: 0.0,
+                glyph_cache: std::collections::HashMap::new(),
                 cwd: None,
                 cwd_host: String::new(),
                 cwd_stale: true,
@@ -814,9 +825,13 @@ impl Terminal {
                 let gal_w = ui.ctx().fonts_mut(|f| {
                     f.layout_no_wrap("0123456789abcdefghij".to_string(), font_id.clone(), egui::Color32::WHITE).rect.width()
                 });
+                // egui's own per-char advance at this raster size vs our grid
+                // step: the number batched run drawing would accumulate per char
+                self.adv_delta = gal_w / 20.0 - cell_w;
+                self.glyph_cache.clear();
                 crate::diag::log(&format!(
-                    "render metrics: ppp={ppp} font={:.1}px cell={cell_w:.2}x{cell_h:.2} galley20={gal_w:.2} expected20={:.2} per-char={:.3} vs cell_w",
-                    font_size * ppp, cell_w * 20.0, gal_w / 20.0
+                    "render metrics: ppp={ppp} font={:.1}px cell={cell_w:.2}x{cell_h:.2} galley20={gal_w:.2} expected20={:.2} per-char={:.3} vs cell_w adv_delta={:.3}",
+                    font_size * ppp, cell_w * 20.0, gal_w / 20.0, self.adv_delta
                 ));
             }
         }
@@ -895,6 +910,7 @@ impl Terminal {
                     && (0x20..=0x7e).contains(&(cell.c as u32))
                 {
                     let run_fg = fg;
+                    let run_start = col_i;
                     let mut run = String::with_capacity(48);
                     while col_i < self.cols as usize {
                         let c = &grid_row[Column(col_i)];
@@ -911,13 +927,39 @@ impl Terminal {
                         run.push(c.c);
                         col_i += 1;
                     }
-                    painter.text(
-                        egui::pos2(x, y),
-                        egui::Align2::LEFT_TOP,
-                        &run,
-                        mono_id.clone(),
-                        run_fg,
-                    );
+                    // egui lays the whole run out with the font's own per-glyph
+                    // advance, which at some raster sizes differs from our
+                    // q()-snapped cell_w (measured: up to ±0.19px/char at 25/35px
+                    // vs 20px where it's ~0). Drawing the run as one text shape
+                    // accumulates that difference over the line — the run END
+                    // lands up to several cells off the grid while the cursor
+                    // block stays on its column (the "cursor drifts when zooming"
+                    // bug). Tolerance: ≤ half a pixel of total drift per run.
+                    let drift = self.adv_delta.abs() * run.chars().count() as f32;
+                    if drift <= 0.5 {
+                        painter.text(
+                            egui::pos2(x, y),
+                            egui::Align2::LEFT_TOP,
+                            &run,
+                            mono_id.clone(),
+                            run_fg,
+                        );
+                    } else {
+                        // Drift too big: draw char by char at exact grid columns.
+                        // Single-char galleys are cached (layout is the expensive
+                        // part, not the mesh add) so this keeps d241c05's win.
+                        for (k, ch) in run.chars().enumerate() {
+                            let gx = q(origin.x + (run_start + k) as f32 * cell_w);
+                            let galley = Self::cached_glyph(
+                                &mut self.glyph_cache,
+                                ui.ctx(),
+                                ch,
+                                &font_id,
+                                run_fg,
+                            );
+                            painter.galley(egui::pos2(gx, y), galley, run_fg);
+                        }
+                    }
                     continue;
                 }
 
@@ -1645,6 +1687,31 @@ impl Terminal {
             let sanitized = text.replace("\r", "").replace("\n", "");
             self.write(sanitized.as_bytes());
         }
+    }
+
+    /// Layout one ASCII char (or fetch from the cache) for the per-char run
+    /// fallback: layout is the expensive part, the per-frame mesh add is cheap.
+    /// Takes the cache map directly — paint holds `grid` (an immutable borrow
+    /// of `self.term`) across the render loop, so `&mut self` won't compile.
+    fn cached_glyph(
+        glyph_cache: &mut std::collections::HashMap<(char, u32, [u8; 4]), std::sync::Arc<egui::Galley>>,
+        ctx: &egui::Context,
+        ch: char,
+        font_id: &egui::FontId,
+        color: egui::Color32,
+    ) -> std::sync::Arc<egui::Galley> {
+        if glyph_cache.len() > 8192 {
+            glyph_cache.clear(); // runaway session (weird colors): start over
+        }
+        let key = (ch, font_id.size.to_bits(), [color.r(), color.g(), color.b(), color.a()]);
+        if let Some(g) = glyph_cache.get(&key) {
+            return g.clone();
+        }
+        let galley = ctx.fonts_mut(|f| {
+            f.layout_no_wrap(ch.to_string(), font_id.clone(), color)
+        });
+        glyph_cache.insert(key, galley.clone());
+        galley
     }
 
     /// Resolve a model color to an egui color using the default dark palette
