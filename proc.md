@@ -6,6 +6,17 @@
 
 ---
 
+## 2026-11-18 修复：Win10/虚拟机跑不起来——静态 CRT + 启动失败可见化（GUI 0.10.9）
+
+- **现象**：VMware Win10 虚拟机双击 xxsshg.exe 无反应/秒退，无任何提示
+- **根因（两个叠加）**：① 动态 CRT → 干净系统缺 VCRUNTIME140.dll（Win10 只内置 UCRT）；② `windows_subsystem=windows` 的 release 无控制台，eframe/glow 创建 OpenGL 上下文失败（未装 guest tools 的 VM 只有 GL 1.1）panic/Err 全部不可见
+- **修复**：`.cargo/config.toml` 加 `+crt-static`（依赖表只剩系统自带的 api-ms-win-core-synch-l1-2-0）；main.rs 挂 panic hook + `run_native` Err 弹 `MessageBoxW`（extern 声明零新依赖，每进程一次防刷屏），写 session-debug.log，附虚拟机 3D 加速提示
+- **发布 GUI 0.10.9**：78febc0 → `v0.10.9 (78febc0)` → publish-xxsshg-0.10.9.ps1 → vid=ver-17949696224b799b，18.33MB，sha256 bd7b7a0c…20934；cleanup 删 0.10.8；已推送（35d67a5..78febc0）；实下 sha 一致、输出 `v0.10.9 (78febc0)`；cargo test 64/64
+- 经验已记 exp1.md（GUI 子系统崩溃不可见；VM 无 GL 需装 tools/开 3D 加速，或换 wgpu）
+
+---
+---
+
 ## 2026-11-02 终端 Home/End 改回行首/行尾，Ctrl+Home/End 才滚缓冲区
 
 - 用户反馈：readline 行编辑里 Home/End 更常用，此前（0.2.0 起）Home/End 被劫持为滚缓冲区不对
